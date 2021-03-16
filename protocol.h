@@ -10,6 +10,7 @@
 // reach Final node:
 // |---ForwardHead---|---data---|
 
+const uint32_t kDefaultPort = 40000;
 const uint32_t kForwardMagic = 0xFF44AADD;
 const uint8_t kForwardVersion1 = 1;
 const uint8_t kMaxForwardTTL = 32;
@@ -50,5 +51,11 @@ struct ForwardResponse {
   uint64_t id;
   uint8_t data[0];
 } __attribute__((packed));
+
+uint32_t DataOffset(ForwardRequest *req) {
+  return sizeof(ForwardRequest) + req->ttl * sizeof(ForwardNode);
+}
+
+uint32_t DataOffset(ForwardResponse *res) { return sizeof(ForwardResponse); }
 
 #endif  // PROTOCOL_H_
