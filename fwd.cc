@@ -33,6 +33,25 @@ int main(int argc, char *argv[]) {
     printf("connect error, %d\n", errno);
     return -1;
   }
-  printf("connect success\n");
+  ForwardRequest req;
+  char data[16] = "abcde";
+  req.length = sizeof(req) + sizeof(data);
+  req.magic = kForwardMagic;
+  req.version = kForwardVersion1;
+  req.cmd = ForwardPush;
+  req.ttl = kMaxForwardTTL;
+  req.id = 0;
+  int len = write(sockfd, (const void *)&req, sizeof(req));
+  if (len != sizeof(req)) {
+    printf("write error, %d %d\n", len, errno);
+    return -1;
+  }
+  len = write(sockfd, data, sizeof(data));
+  if (len != sizeof(req)) {
+    printf("write error, %d %d\n", len, errno);
+    return -1;
+  }
+  printf("write success\n");
+  close(sockfd);
   return 0;
 }

@@ -47,6 +47,23 @@ int forward_loop() {
     inet_ntop(AF_INET, &src_addr.sin_addr, ip_str, sizeof(ip_str));
     printf("accept %d, ip: %s, port: %d\n", fd, ip_str,
            ntohs(src_addr.sin_port));
+    char buffer[4096];
+    int len = read(fd, buffer, sizeof(uint32_t));
+    if (len != sizeof(uint32_t)) {
+      printf("read error, %d %d\n", len, errno);
+      return -1;
+    }
+    uint32_t data_len = *(uint32_t *)buffer;
+    uint32_t left_len = data_len - sizeof(uint32_t);
+    len = read(fd, buffer + sizeof(uint32_t) / sizeof(char), left_len);
+    if (len != sizeof(uint32_t)) {
+      printf("read error, %d %d\n", len, errno);
+      return -1;
+    }
+    ForwardRequest *req = (ForwardRequest *)buffer;
+    printf("length %d, magic %d, version %d, cmd %d, ttl %d, id %d\n",
+           req->length, req->magic, req->version, req->cmd, req->ttl, req->id);
+    printf("data %s\n", req->data);
     close(fd);
   }
   return 0;
