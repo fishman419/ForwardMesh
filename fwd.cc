@@ -47,7 +47,7 @@ int main(int argc, char *argv[]) {
     return -1;
   }
   len = write(sockfd, data, sizeof(data));
-  if (len != sizeof(req)) {
+  if (len != sizeof(data)) {
     printf("write error, %d %d\n", len, errno);
     return -1;
   }

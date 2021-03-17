@@ -56,7 +56,7 @@ int forward_loop() {
     uint32_t data_len = *(uint32_t *)buffer;
     uint32_t left_len = data_len - sizeof(uint32_t);
     len = read(fd, buffer + sizeof(uint32_t) / sizeof(char), left_len);
-    if (len != sizeof(uint32_t)) {
+    if (len != sizeof(left_len)) {
       printf("read error, %d %d\n", len, errno);
       return -1;
     }
