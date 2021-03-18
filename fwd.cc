@@ -11,8 +11,24 @@
 #include "protocol.h"
 
 int main(int argc, char *argv[]) {
-  if (argc < 2) {
-    printf("no dst ip\n");
+  int opt;
+  char *ip = nullptr;
+  int port = kDefaultPort;
+  while ((opt = getopt(argc, argv, "i:p:")) != -1) {
+    switch (opt) {
+      case 'i':
+        ip = strdup(optarg);
+        break;
+      case 'p':
+        port = atoi(optarg);
+        break;
+      default:
+        printf("Usage: %s <-i ip> [-p port]\n", argv[0]);
+        return -1;
+    }
+  }
+  if (!ip) {
+    printf("please input ip\n");
     return -1;
   }
   int sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -24,10 +40,11 @@ int main(int argc, char *argv[]) {
   dst_addr.sin_family = AF_INET;
   dst_addr.sin_port = htons(kDefaultPort);
 
-  if (inet_pton(AF_INET, argv[1], &dst_addr.sin_addr) < 0) {
-    printf("address is invalid, %s\n", argv[1]);
+  if (inet_pton(AF_INET, ip, &dst_addr.sin_addr) < 0) {
+    printf("address is invalid, %s\n", ip);
     return -1;
   }
+  free(ip);
 
   if (connect(sockfd, (struct sockaddr *)&dst_addr, sizeof(dst_addr)) < 0) {
     printf("connect error, %d\n", errno);
