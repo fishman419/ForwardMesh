@@ -11,6 +11,42 @@
 
 #include "protocol.h"
 
+int forward_file(int fd, const char *filename) {
+  ForwardRequest req;
+  char data[16] = "abcde";
+  uint32_t ff_length = sizeof(ForwardFile) + strlen(filename) + 1;
+  req.length = sizeof(req) + ff_length + sizeof(data);
+  req.magic = kForwardMagic;
+  req.version = kForwardVersion1;
+  req.cmd = ForwardPush;
+  req.ttl = 0;
+  req.id = 0;
+  ForwardFile *ff = malloc(ff_length);
+  ff->filename_length = strlen(filename) + 1;
+  strncpy(ff->filename, filename, strlen(filename));
+  int len = write(fd, (const void *)&req, sizeof(req));
+  if (len != sizeof(req)) {
+    printf("write error, %d %d\n", len, errno);
+    free(ff);
+    return -1;
+  }
+  len = write(fd, ff, ff_length);
+  if (len != ff_length) {
+    printf("write error, %d %d\n", len, errno);
+    free(ff);
+    return -1;
+  }
+  len = write(fd, data, sizeof(data));
+  if (len != sizeof(data)) {
+    printf("write error, %d %d\n", len, errno);
+    free(ff);
+    return -1;
+  }
+  free(ff);
+  printf("write success\n");
+  return 0;
+}
+
 int main(int argc, char *argv[]) {
   int opt;
   char *ip = nullptr;
@@ -51,25 +87,10 @@ int main(int argc, char *argv[]) {
     printf("connect error, %d\n", errno);
     return -1;
   }
-  ForwardRequest req;
-  char data[16] = "abcde";
-  req.length = sizeof(req) + sizeof(data);
-  req.magic = kForwardMagic;
-  req.version = kForwardVersion1;
-  req.cmd = ForwardPush;
-  req.ttl = kMaxForwardTTL;
-  req.id = 0;
-  int len = write(sockfd, (const void *)&req, sizeof(req));
-  if (len != sizeof(req)) {
-    printf("write error, %d %d\n", len, errno);
+  if (forward_file(sockfd, "test.txt")) {
+    printf("forward file error\n");
     return -1;
   }
-  len = write(sockfd, data, sizeof(data));
-  if (len != sizeof(data)) {
-    printf("write error, %d %d\n", len, errno);
-    return -1;
-  }
-  printf("write success\n");
   close(sockfd);
   return 0;
 }

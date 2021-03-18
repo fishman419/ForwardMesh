@@ -4,11 +4,11 @@
 #include <stdint.h>
 
 // packet format:
-// |---ForwardHead---|---ForwardNode*n---|---data---|
+// |---ForwardHead---|---ForwardNode*n---|---ForwardFile---|---data---|
 // After forward one node:
-// |---ForwardHead---|---ForwardNode*(n-1)---|---data---|
+// |---ForwardHead---|---ForwardNode*(n-1)---|---ForwardFile---|---data---|
 // reach Final node:
-// |---ForwardHead---|---data---|
+// |---ForwardHead---|---ForwardFile---|---data---|
 
 const uint32_t kDefaultPort = 40000;
 const uint32_t kForwardMagic = 0xFF44AADD;
@@ -28,6 +28,11 @@ enum ForwardCommand {
 struct ForwardNode {
   uint32_t ip;
   uint32_t port;
+} __attribute__((packed));
+
+struct ForwardFile {
+  uint32_t filename_length;
+  uint8_t filename[0];
 } __attribute__((packed));
 
 struct ForwardRequest {

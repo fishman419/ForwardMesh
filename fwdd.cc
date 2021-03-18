@@ -70,7 +70,11 @@ int forward_loop(int port) {
     ForwardRequest *req = (ForwardRequest *)buffer;
     printf("length %d, magic %d, version %d, cmd %d, ttl %d, id %d\n",
            req->length, req->magic, req->version, req->cmd, req->ttl, req->id);
-    printf("data %s\n", req->data);
+    ForwardFile *ff = (ForwardFile *)(req->data);
+    printf("filename_length: %d, filename: %s", ff->filename_length,
+           ff->filename);
+    char *data = req->data + sizeof(ForwardFile) + ff->filename_length;
+    printf("data %s\n", data);
     close(fd);
   }
   return 0;
