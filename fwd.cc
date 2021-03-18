@@ -50,8 +50,9 @@ int forward_file(int fd, const char *filename) {
 int main(int argc, char *argv[]) {
   int opt;
   char *ip = nullptr;
+  char *fpath = nullptr;
   int port = kDefaultPort;
-  while ((opt = getopt(argc, argv, "i:p:")) != -1) {
+  while ((opt = getopt(argc, argv, "i:p:f:")) != -1) {
     switch (opt) {
       case 'i':
         ip = strdup(optarg);
@@ -59,13 +60,30 @@ int main(int argc, char *argv[]) {
       case 'p':
         port = atoi(optarg);
         break;
+      case 'f':
+        fpath = strdup(optarg);
+        struct stat s;
+        if (stat(fpath, &s)) {
+          printf("stat error, fpath %s, %d\n", fpath, errno);
+          return -1;
+        }
+        if (!S_ISREG(s.st_mode)) {
+          printf("input file is not regular file, fpath %s, mode %d\n", fpath,
+                 s.st_mode);
+          return -1;
+        }
+        break;
       default:
-        printf("Usage: %s <-i ip> [-p port]\n", argv[0]);
+        printf("Usage: %s <-i ip> <-f file> [-p port]\n", argv[0]);
         return -1;
     }
   }
   if (!ip) {
     printf("please input ip\n");
+    return -1;
+  }
+  if (!fpath) {
+    printf("please input file\n");
     return -1;
   }
   int sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -87,7 +105,12 @@ int main(int argc, char *argv[]) {
     printf("connect error, %d\n", errno);
     return -1;
   }
-  if (forward_file(sockfd, "test.txt")) {
+
+  char *filename = strrchr(fpath, '/');
+  if (!filename) {
+    filename = fpath;
+  }
+  if (forward_file(sockfd, filename + 1)) {
     printf("forward file error\n");
     return -1;
   }
