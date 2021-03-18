@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -11,7 +12,7 @@
 
 #include "protocol.h"
 
-int forward_loop() {
+int forward_loop(int port) {
   int sockfd = socket(AF_INET, SOCK_STREAM, 0);
   if (sockfd < 0) {
     printf("socket error, %d\n", errno);
@@ -26,7 +27,7 @@ int forward_loop() {
   struct sockaddr_in address;
   address.sin_family = AF_INET;
   address.sin_addr.s_addr = INADDR_ANY;
-  address.sin_port = htons(kDefaultPort);
+  address.sin_port = htons(port);
   if (bind(sockfd, (struct sockaddr *)&address, sizeof(address))) {
     printf("bind error, %d\n", errno);
     return -1;
@@ -65,7 +66,7 @@ int forward_loop() {
       }
       offset += len;
       left_len -= len;
-    } 
+    }
     ForwardRequest *req = (ForwardRequest *)buffer;
     printf("length %d, magic %d, version %d, cmd %d, ttl %d, id %d\n",
            req->length, req->magic, req->version, req->cmd, req->ttl, req->id);
@@ -76,6 +77,31 @@ int forward_loop() {
 }
 
 int main(int argc, char *argv[]) {
+  int opt;
+  int port = kDefaultPort;
+  char *dir = nullptr;
+  while ((opt = getopt(argc, argv, "p:d:")) != -1) {
+    switch (opt) {
+      case 'p':
+        port = atoi(optarg);
+        break;
+      case 'd':
+        dir = strdup(optarg);
+        struct stat s;
+        if (stat(dir, &s)) {
+          printf("stat error, dir %s, %d\n", dir, errno);
+          return -1;
+        }
+        if (s.st_mode & S_IFMT != S_IFDIR) {
+          printf("input dir is not directory, dir %s\n", dir);
+          return -1;
+        }
+        break;
+      default:
+        printf("Usage: %s [-p port] [-d dir]\n", argv[0]);
+        return -1;
+    }
+  }
   pid_t pid;
   pid = fork();
   if (pid < 0) {
@@ -103,7 +129,12 @@ int main(int argc, char *argv[]) {
     return 0;
   }
   umask(0);
-  chdir("/");
-  printf("deamon start\n");
-  return forward_loop();
+  if (dir) {
+    chdir(dir);
+    free(dir);
+  } else {
+    chdir("/");
+  }
+  printf("forward daemon start\n");
+  return forward_loop(port);
 }
