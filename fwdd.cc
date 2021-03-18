@@ -73,7 +73,7 @@ int forward_loop(int port) {
     ForwardFile *ff = (ForwardFile *)(req->data);
     printf("filename_length: %d, filename: %s", ff->filename_length,
            ff->filename);
-    char *data = req->data + sizeof(ForwardFile) + ff->filename_length;
+    uint8_t *data = req->data + sizeof(ForwardFile) + ff->filename_length;
     printf("data %s\n", data);
     close(fd);
   }

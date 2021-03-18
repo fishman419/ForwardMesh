@@ -21,9 +21,9 @@ int forward_file(int fd, const char *filename) {
   req.cmd = ForwardPush;
   req.ttl = 0;
   req.id = 0;
-  ForwardFile *ff = malloc(ff_length);
+  ForwardFile *ff = (ForwardFile *)malloc(ff_length);
   ff->filename_length = strlen(filename) + 1;
-  strncpy(ff->filename, filename, strlen(filename));
+  strncpy((char *)ff->filename, filename, strlen(filename));
   int len = write(fd, (const void *)&req, sizeof(req));
   if (len != sizeof(req)) {
     printf("write error, %d %d\n", len, errno);
