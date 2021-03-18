@@ -109,8 +109,10 @@ int main(int argc, char *argv[]) {
   char *filename = strrchr(fpath, '/');
   if (!filename) {
     filename = fpath;
+  } else {
+    filename += 1;
   }
-  if (forward_file(sockfd, filename + 1)) {
+  if (forward_file(sockfd, filename)) {
     printf("forward file error\n");
     return -1;
   }
