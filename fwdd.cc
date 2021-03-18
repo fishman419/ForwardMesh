@@ -92,8 +92,9 @@ int main(int argc, char *argv[]) {
           printf("stat error, dir %s, %d\n", dir, errno);
           return -1;
         }
-        if (s.st_mode & S_IFMT != S_IFDIR) {
-          printf("input dir is not directory, dir %s\n", dir);
+        if (!S_ISDIR(s.st_mode)) {
+          printf("input dir is not directory, dir %s, mode %d\n", dir,
+                 s.st_mode);
           return -1;
         }
         break;
