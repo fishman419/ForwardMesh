@@ -68,13 +68,13 @@ int forward_loop(int port) {
       left_len -= len;
     }
     ForwardRequest *req = (ForwardRequest *)buffer;
-    printf("length %d, magic %d, version %d, cmd %d, ttl %d, id %d\n",
+    printf("[header]length %d, magic %d, version %d, cmd %d, ttl %d, id %d\n",
            req->length, req->magic, req->version, req->cmd, req->ttl, req->id);
-    ForwardFile *ff = (ForwardFile *)(req->data);
-    printf("filename_length: %d, filename: %s", ff->filename_length,
-           ff->filename);
-    uint8_t *data = req->data + sizeof(ForwardFile) + ff->filename_length;
-    printf("data %s\n", data);
+    ForwardFile *fmeta = (ForwardFile *)(req->data);
+    printf("[filemeta]length: %d, filename: %s\n", fmeta->length,
+           fmeta->filename);
+    uint8_t *data = req->data + sizeof(ForwardFile) + fmeta->length;
+    printf("[data]%s\n", data);
     close(fd);
   }
   return 0;

@@ -31,7 +31,7 @@ struct ForwardNode {
 } __attribute__((packed));
 
 struct ForwardFile {
-  uint32_t filename_length;
+  uint32_t length;
   uint8_t filename[0];
 } __attribute__((packed));
 

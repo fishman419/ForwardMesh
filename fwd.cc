@@ -21,28 +21,28 @@ int forward_file(int fd, const char *filename) {
   req.cmd = ForwardPush;
   req.ttl = 0;
   req.id = 0;
-  ForwardFile *ff = (ForwardFile *)malloc(ff_length);
-  ff->filename_length = strlen(filename) + 1;
-  strncpy((char *)ff->filename, filename, strlen(filename));
+  ForwardFile *fmeta = (ForwardFile *)malloc(ff_length);
+  fmeta->length = strlen(filename) + 1;
+  strncpy((char *)fmeta->filename, filename, strlen(filename));
   int len = write(fd, (const void *)&req, sizeof(req));
   if (len != sizeof(req)) {
     printf("write error, %d %d\n", len, errno);
-    free(ff);
+    free(fmeta);
     return -1;
   }
-  len = write(fd, ff, ff_length);
+  len = write(fd, fmeta, ff_length);
   if (len != ff_length) {
     printf("write error, %d %d\n", len, errno);
-    free(ff);
+    free(fmeta);
     return -1;
   }
   len = write(fd, data, sizeof(data));
   if (len != sizeof(data)) {
     printf("write error, %d %d\n", len, errno);
-    free(ff);
+    free(fmeta);
     return -1;
   }
-  free(ff);
+  free(fmeta);
   printf("write success\n");
   return 0;
 }
