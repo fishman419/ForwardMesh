@@ -39,7 +39,7 @@ int main(int argc, char *argv[]) {
   }
   struct sockaddr_in dst_addr;
   dst_addr.sin_family = AF_INET;
-  dst_addr.sin_port = htons(kDefaultPort);
+  dst_addr.sin_port = htons(port);
 
   if (inet_pton(AF_INET, ip, &dst_addr.sin_addr) < 0) {
     printf("address is invalid, %s\n", ip);
