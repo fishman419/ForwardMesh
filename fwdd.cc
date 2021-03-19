@@ -1,5 +1,6 @@
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -13,6 +14,7 @@
 #include "protocol.h"
 
 int forward_loop(int port) {
+  char buffer[16384];
   int sockfd = socket(AF_INET, SOCK_STREAM, 0);
   if (sockfd < 0) {
     printf("socket error, %d\n", errno);
@@ -48,7 +50,6 @@ int forward_loop(int port) {
     inet_ntop(AF_INET, &src_addr.sin_addr, ip_str, sizeof(ip_str));
     printf("accept %d, ip: %s, port: %d\n", fd, ip_str,
            ntohs(src_addr.sin_port));
-    char buffer[4096];
     uint32_t offset = 0;
     int len = read(fd, buffer, sizeof(uint32_t));
     if (len != sizeof(uint32_t)) {
@@ -57,7 +58,9 @@ int forward_loop(int port) {
     }
     offset += sizeof(uint32_t) / sizeof(char);
     uint32_t data_len = *(uint32_t *)buffer;
-    uint32_t left_len = data_len - sizeof(uint32_t);
+    uint32_t left_len = sizeof(ForwardRequest) - sizeof(uint32_t);
+    ForwardRequest req;
+    // header
     while (left_len != 0) {
       len = read(fd, buffer + offset, left_len);
       if (len < 0) {
@@ -67,14 +70,55 @@ int forward_loop(int port) {
       offset += len;
       left_len -= len;
     }
-    ForwardRequest *req = (ForwardRequest *)buffer;
+    memcpy(&req, buffer, sizeof(ForwardRequest));
     printf("[header]length %d, magic %d, version %d, cmd %d, ttl %d, id %d\n",
-           req->length, req->magic, req->version, req->cmd, req->ttl, req->id);
-    ForwardFile *fmeta = (ForwardFile *)(req->data);
+           req.length, req.magic, req.version, req.cmd, req.ttl, req.id);
+    // fmeta
+    len = read(fd, buffer, sizeof(uint32_t));
+    if (len != sizeof(uint32_t)) {
+      printf("read error, %d %d\n", len, errno);
+      return -1;
+    }
+    uint32_t f_length = *(uint32_t *)buffer;
+    ForwardFile *fmeta = (ForwardFile *)malloc(sizeof(ForwardFile) + f_length);
+    fmeta->length = f_length;
+    left_len = f_length;
+    offset = 0;
+    while (left_len != 0) {
+      len = read(fd, fmeta->filename + offset, left_len);
+      if (len < 0) {
+        printf("read error, %d\n", errno);
+        return -1;
+      }
+      offset += len;
+      left_len -= len;
+    }
     printf("[filemeta]length: %d, filename: %s\n", fmeta->length,
            fmeta->filename);
-    uint8_t *data = req->data + sizeof(ForwardFile) + fmeta->length;
-    printf("[data]%s\n", data);
+    // data
+    int w_fd = open(fmeta->filename, O_CREAT, O_RDWR);
+    if (w_fd < 0) {
+      printf("open error, %d\n", errno);
+      return -1;
+    }
+    left_len =
+        data_len - sizeof(ForwardRequest) - sizeof(ForwardFile) - f_length;
+    offset = 0;
+    while (left_len > 0) {
+      len = read(fd, buffer, 16384);
+      if (len < 0) {
+        printf("read error, %d\n", errno);
+        return -1;
+      }
+      left_len -= len;
+      int write_len = write(w_fd, buffer, len);
+      if (write_len != len) {
+        printf("write error, %d %d\n", write_len, errno);
+        return -1;
+      }
+    }
+    close(w_fd);
+    printf("data write success\n");
     close(fd);
   }
   return 0;
