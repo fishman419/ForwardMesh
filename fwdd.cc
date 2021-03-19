@@ -96,7 +96,7 @@ int forward_loop(int port) {
     printf("[filemeta]length: %d, filename: %s\n", fmeta->length,
            fmeta->filename);
     // data
-    int w_fd = open(fmeta->filename, O_CREAT, O_RDWR);
+    int w_fd = open((const char*)fmeta->filename, O_CREAT, O_RDWR);
     if (w_fd < 0) {
       printf("open error, %d\n", errno);
       return -1;
