@@ -24,7 +24,7 @@ int forward_file(int fd, const char *fpath) {
   ForwardFile *fmeta = nullptr;
   uint32_t fmeta_length;
   char data[16384];
-  r_fd = open(fpath, 0, O_RDONLY);
+  r_fd = open(fpath, O_RDONLY);
   if (r_fd < 0) {
     printf("open file error, %d\n", errno);
     ret = -1;
