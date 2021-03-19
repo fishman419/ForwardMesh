@@ -1,5 +1,6 @@
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,17 +12,34 @@
 
 #include "protocol.h"
 
-int forward_file(int fd, const char *filename) {
+int forward_file(int fd, const char *fpath) {
+  int r_fd = open(fpath, 0, O_RDONLY);
+  if (r_fd < 0) {
+    printf("open file error, %d\n", errno);
+    return -1;
+  }
+  struct stat s;
+  if (stat(fpath, &s)) {
+    printf("stat error, fpath %s, %d\n", fpath, errno);
+    return -1;
+  }
+  uint64_t f_size = s.st_size;
+  char *filename = strrchr(fpath, '/');
+  if (!filename) {
+    filename = fpath;
+  } else {
+    filename += 1;
+  }
   ForwardRequest req;
-  char data[16] = "abcde";
-  uint32_t ff_length = sizeof(ForwardFile) + strlen(filename) + 1;
-  req.length = sizeof(req) + ff_length + sizeof(data);
+  char data[16384];
+  uint32_t fmeta_length = sizeof(ForwardFile) + strlen(filename) + 1;
+  req.length = sizeof(req) + fmeta_length + f_size;
   req.magic = kForwardMagic;
   req.version = kForwardVersion1;
   req.cmd = ForwardPush;
   req.ttl = 0;
   req.id = 0;
-  ForwardFile *fmeta = (ForwardFile *)malloc(ff_length);
+  ForwardFile *fmeta = (ForwardFile *)malloc(fmeta_length);
   fmeta->length = strlen(filename) + 1;
   strncpy((char *)fmeta->filename, filename, strlen(filename));
   int len = write(fd, (const void *)&req, sizeof(req));
@@ -30,19 +48,27 @@ int forward_file(int fd, const char *filename) {
     free(fmeta);
     return -1;
   }
-  len = write(fd, fmeta, ff_length);
-  if (len != ff_length) {
-    printf("write error, %d %d\n", len, errno);
-    free(fmeta);
-    return -1;
-  }
-  len = write(fd, data, sizeof(data));
-  if (len != sizeof(data)) {
+  len = write(fd, fmeta, fmeta_length);
+  if (len != fmeta_length) {
     printf("write error, %d %d\n", len, errno);
     free(fmeta);
     return -1;
   }
   free(fmeta);
+  while (f_size > 0) {
+    len = read(r_fd, data, sizeof(data));
+    if (len < 0) {
+      printf("read error, %d\n", errno);
+      return -1;
+    }
+    f_size -= len;
+    len = write(fd, data, len);
+    if (len != sizeof(data)) {
+      printf("write error, %d %d\n", len, errno);
+      return -1;
+    }
+  }
+  close(r_fd);
   printf("write success\n");
   return 0;
 }
@@ -106,13 +132,7 @@ int main(int argc, char *argv[]) {
     return -1;
   }
 
-  char *filename = strrchr(fpath, '/');
-  if (!filename) {
-    filename = fpath;
-  } else {
-    filename += 1;
-  }
-  if (forward_file(sockfd, filename)) {
+  if (forward_file(sockfd, fpath)) {
     printf("forward file error\n");
     return -1;
   }
