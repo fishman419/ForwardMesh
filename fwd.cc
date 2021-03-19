@@ -13,64 +13,82 @@
 #include "protocol.h"
 
 int forward_file(int fd, const char *fpath) {
-  int r_fd = open(fpath, 0, O_RDONLY);
+  int r_fd = 0;
+  int read_len;
+  int write_len;
+  int ret = 0;
+  struct stat s;
+  uint64_t f_size;
+  const char *filename;
+  ForwardRequest req;
+  ForwardFile *fmeta = nullptr;
+  uint32_t fmeta_length;
+  char data[16384];
+  r_fd = open(fpath, 0, O_RDONLY);
   if (r_fd < 0) {
     printf("open file error, %d\n", errno);
-    return -1;
+    ret = -1;
+    goto out;
   }
-  struct stat s;
   if (stat(fpath, &s)) {
     printf("stat error, fpath %s, %d\n", fpath, errno);
-    return -1;
+    ret = -1;
+    goto out;
   }
-  uint64_t f_size = s.st_size;
-  char *filename = strrchr(fpath, '/');
+  f_size = s.st_size;
+  filename = strrchr(fpath, '/');
   if (!filename) {
     filename = fpath;
   } else {
     filename += 1;
   }
-  ForwardRequest req;
-  char data[16384];
-  uint32_t fmeta_length = sizeof(ForwardFile) + strlen(filename) + 1;
+  fmeta_length = sizeof(ForwardFile) + strlen(filename) + 1;
   req.length = sizeof(req) + fmeta_length + f_size;
   req.magic = kForwardMagic;
   req.version = kForwardVersion1;
   req.cmd = ForwardPush;
   req.ttl = 0;
   req.id = 0;
-  ForwardFile *fmeta = (ForwardFile *)malloc(fmeta_length);
+  fmeta = (ForwardFile *)malloc(fmeta_length);
   fmeta->length = strlen(filename) + 1;
   strncpy((char *)fmeta->filename, filename, strlen(filename));
-  int len = write(fd, (const void *)&req, sizeof(req));
-  if (len != sizeof(req)) {
-    printf("write error, %d %d\n", len, errno);
-    free(fmeta);
-    return -1;
+  write_len = write(fd, (const void *)&req, sizeof(req));
+  if (write_len != sizeof(req)) {
+    printf("write error, %d %d\n", write_len, errno);
+    ret = -1;
+    goto out;
   }
-  len = write(fd, fmeta, fmeta_length);
-  if (len != fmeta_length) {
-    printf("write error, %d %d\n", len, errno);
-    free(fmeta);
-    return -1;
+  write_len = write(fd, fmeta, fmeta_length);
+  if (write_len != fmeta_length) {
+    printf("write error, %d %d\n", write_len, errno);
+    ret = -1;
+    goto out;
   }
-  free(fmeta);
   while (f_size > 0) {
-    len = read(r_fd, data, sizeof(data));
-    if (len < 0) {
+    read_len = read(r_fd, data, sizeof(data));
+    if (read_len < 0) {
       printf("read error, %d\n", errno);
-      return -1;
+      ret = -1;
+      goto out;
     }
-    f_size -= len;
-    len = write(fd, data, len);
-    if (len != sizeof(data)) {
-      printf("write error, %d %d\n", len, errno);
-      return -1;
+    f_size -= read_len;
+    write_len = write(fd, data, read_len);
+    if (write_len != read_len) {
+      printf("write error, %d %d\n", write_len, errno);
+      ret = -1;
+      goto out;
     }
   }
-  close(r_fd);
+
   printf("write success\n");
-  return 0;
+out:
+  if (r_fd) {
+    close(r_fd);
+  }
+  if (fmeta) {
+    free(fmeta);
+  }
+  return ret;
 }
 
 int main(int argc, char *argv[]) {
