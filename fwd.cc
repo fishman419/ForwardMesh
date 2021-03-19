@@ -21,7 +21,7 @@ int forward_file(int fd, const char *fpath) {
   uint64_t f_size;
   const char *filename;
   ForwardRequest req;
-  ForwardFile *fmeta = nullptr;
+  ForwardFile *fmeta = NULL;
   uint32_t fmeta_length;
   char data[16384];
   r_fd = open(fpath, O_RDONLY);
@@ -93,8 +93,8 @@ out:
 
 int main(int argc, char *argv[]) {
   int opt;
-  char *ip = nullptr;
-  char *fpath = nullptr;
+  char *ip = NULL;
+  char *fpath = NULL;
   int port = kDefaultPort;
   while ((opt = getopt(argc, argv, "i:p:f:")) != -1) {
     switch (opt) {

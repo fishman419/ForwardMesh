@@ -129,7 +129,7 @@ int forward_loop(int port) {
 int main(int argc, char *argv[]) {
   int opt;
   int port = kDefaultPort;
-  char *dir = nullptr;
+  char *dir = NULL;
   while ((opt = getopt(argc, argv, "p:d:")) != -1) {
     switch (opt) {
       case 'p':
