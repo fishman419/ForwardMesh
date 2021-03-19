@@ -96,26 +96,28 @@ int forward_loop(int port) {
     printf("[filemeta]length: %d, filename: %s\n", fmeta->length,
            fmeta->filename);
     // data
-    int w_fd = open((const char*)fmeta->filename, O_CREAT, O_RDWR);
+    int w_fd = open((const char *)fmeta->filename, O_CREAT, O_RDWR);
     if (w_fd < 0) {
       printf("open error, %d\n", errno);
       return -1;
     }
     left_len =
         data_len - sizeof(ForwardRequest) - sizeof(ForwardFile) - f_length;
-    offset = 0;
+    printf("data length: %d\n", left_len);
     while (left_len > 0) {
       len = read(fd, buffer, 16384);
       if (len < 0) {
         printf("read error, %d\n", errno);
         return -1;
       }
+      printf("read length %d\n", len);
       left_len -= len;
       int write_len = write(w_fd, buffer, len);
       if (write_len != len) {
         printf("write error, %d %d\n", write_len, errno);
         return -1;
       }
+      printf("write length %d\n", write_len);
     }
     close(w_fd);
     printf("data write success\n");
