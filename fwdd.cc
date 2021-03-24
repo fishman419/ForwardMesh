@@ -60,7 +60,7 @@ int forward_loop(int port) {
     uint32_t data_len = *(uint32_t *)buffer;
     uint32_t left_len = sizeof(ForwardRequest) - sizeof(uint32_t);
     ForwardRequest req;
-    // header
+    // ForwardRequest
     while (left_len != 0) {
       len = read(fd, buffer + offset, left_len);
       if (len < 0) {
@@ -73,7 +73,26 @@ int forward_loop(int port) {
     memcpy(&req, buffer, sizeof(ForwardRequest));
     printf("[header]length %d, magic %d, version %d, cmd %d, ttl %d, id %d\n",
            req.length, req.magic, req.version, req.cmd, req.ttl, req.id);
-    // fmeta
+    // ForwardNode
+    if (req.ttl) {
+      left_len = sizeof(ForwardNode) * req.ttl;
+      offset = 0;
+      ForwardNode *fnodes = (ForwardNode *)malloc(left_len);
+      while (left_len != 0) {
+        len = read(fd, (uint8_t *)fnodes + offset, left_len);
+        if (len < 0) {
+          printf("read error, %d\n", errno);
+          return -1;
+        }
+        offset += len;
+        left_len -= len;
+      }
+      for (uint32_t i = 0; i < req.ttl; ++i) {
+        printf("[node%u]ip %u, port %u\n", i, fnodes[i].ip, fnodes[i].port);
+      }
+      free(fnodes);
+    }
+    // ForwardFile
     len = read(fd, buffer, sizeof(uint32_t));
     if (len != sizeof(uint32_t)) {
       printf("read error, %d %d\n", len, errno);
@@ -119,6 +138,7 @@ int forward_loop(int port) {
       }
       printf("write length %d\n", write_len);
     }
+    free(fmeta);
     close(w_fd);
     printf("data write success\n");
     close(fd);
