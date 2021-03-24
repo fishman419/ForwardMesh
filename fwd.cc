@@ -133,7 +133,7 @@ int resolve_address(char *raw_str, ForwardAddress *res) {
       addr = cxx_str.substr(pos, next - pos);
       pos = next + 1;
     }
-    size_t port_pos = addr.find(',');
+    size_t port_pos = addr.find(':');
     if (port_pos != std::string::npos) {
       port = atoi(addr.substr(port_pos + 1, std::string::npos).c_str());
     }
