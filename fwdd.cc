@@ -115,8 +115,6 @@ int forward_loop(int port) {
       offset += len;
       left_len -= len;
     }
-    printf("[FWDD][filemeta]length: %d, filename: %s\n", fmeta->length,
-           fmeta->filename);
     // data
     int w_fd = open((const char *)fmeta->filename, O_CREAT | O_RDWR, 0644);
     if (w_fd < 0) {
@@ -125,25 +123,22 @@ int forward_loop(int port) {
     }
     left_len = data_len - sizeof(ForwardRequest) -
                sizeof(ForwardNode) * req.ttl - sizeof(ForwardFile) - f_length;
-    printf("[FWDD]data length: %d\n", left_len);
     while (left_len > 0) {
       len = read(fd, buffer, 16384);
       if (len < 0) {
         printf("[FWDD]read error, %d\n", errno);
         return -1;
       }
-      printf("[FWDD]read length %d\n", len);
       left_len -= len;
       int write_len = write(w_fd, buffer, len);
       if (write_len != len) {
         printf("[FWDD]write error, %d %d\n", write_len, errno);
         return -1;
       }
-      printf("[FWDD]write length %d\n", write_len);
     }
+    printf("[FWDD]data write to %s success\n", fmeta->filename);
     free(fmeta);
     close(w_fd);
-    printf("[FWDD]data write success\n");
     close(fd);
   }
   return 0;
