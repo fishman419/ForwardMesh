@@ -135,7 +135,7 @@ int resolve_address(char *raw_str, ForwardAddress *res) {
     }
     size_t port_pos = addr.find(',');
     if (port_pos != std::string::npos) {
-      port = atoi(addr.substr(port_pos + 1, std::string::npos));
+      port = atoi(addr.substr(port_pos + 1, std::string::npos).c_str());
     }
     uint32_t ip;
     if (inet_pton(AF_INET, addr.substr(0, port_pos).c_str(), &ip) < 0) {
