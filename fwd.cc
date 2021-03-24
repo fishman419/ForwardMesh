@@ -150,7 +150,6 @@ int resolve_address(char *raw_str, ForwardAddress *res) {
 int main(int argc, char *argv[]) {
   int opt;
   ForwardAddress forward_address;
-  char *ip = NULL;
   char *fpath = NULL;
   while ((opt = getopt(argc, argv, "a:f:")) != -1) {
     switch (opt) {
@@ -165,7 +164,7 @@ int main(int argc, char *argv[]) {
         }
         for (auto it = forward_address.begin(); it != forward_address.end();
              ++it) {
-          printf("ip %d port %d\n", it->first, it->second);
+          printf("ip %u port %u\n", it->first, it->second);
         }
         break;
       case 'f':
@@ -189,10 +188,6 @@ int main(int argc, char *argv[]) {
         return -1;
     }
   }
-  if (!ip) {
-    printf("please input ip\n");
-    return -1;
-  }
   if (!fpath) {
     printf("please input file\n");
     return -1;
@@ -206,12 +201,6 @@ int main(int argc, char *argv[]) {
   dst_addr.sin_family = AF_INET;
   dst_addr.sin_port = htons(forward_address[0].second);
   dst_addr.sin_addr.s_addr = forward_address[0].first;
-
-  if (inet_pton(AF_INET, ip, &dst_addr.sin_addr) < 0) {
-    printf("address is invalid, %s\n", ip);
-    return -1;
-  }
-  free(ip);
 
   if (connect(sockfd, (struct sockaddr *)&dst_addr, sizeof(dst_addr)) < 0) {
     printf("connect error, %d\n", errno);
