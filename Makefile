@@ -1,5 +1,5 @@
 CXX=g++
-CXXFLAGS=-I.
+CXXFLAGS=-std=c++11 -I.
 DEPS = protocol.h
 OBJ_FWDD = fwdd.o
 OBJ_FWD = fwd.o
