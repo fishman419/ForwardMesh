@@ -69,6 +69,7 @@ int forward_file(int fd, const char *fpath, const ForwardAddress &address) {
     for (uint32_t i = 1; i < address.size(); ++i) {
       fnodes[i - 1].ip = address[i].first;
       fnodes[i - 1].port = address[i].second;
+      printf("ip %u port %u\n", fnodes[i - 1].ip, fnodes[i - 1].port);
     }
     write_len = write(fd, (const void *)&fnodes, ttl * sizeof(ForwardNode));
     if (write_len != ttl * sizeof(ForwardNode)) {
@@ -161,10 +162,6 @@ int main(int argc, char *argv[]) {
         if (forward_address.empty()) {
           printf("no address parsed\n");
           return -1;
-        }
-        for (auto it = forward_address.begin(); it != forward_address.end();
-             ++it) {
-          printf("ip %u port %u\n", it->first, it->second);
         }
         break;
       case 'f':
