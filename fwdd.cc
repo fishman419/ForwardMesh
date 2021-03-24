@@ -120,8 +120,8 @@ int forward_loop(int port) {
       printf("open error, %d\n", errno);
       return -1;
     }
-    left_len =
-        data_len - sizeof(ForwardRequest) - sizeof(ForwardFile) - f_length;
+    left_len = data_len - sizeof(ForwardRequest) -
+               sizeof(ForwardNode) * req.ttl - sizeof(ForwardFile) - f_length;
     printf("data length: %d\n", left_len);
     while (left_len > 0) {
       len = read(fd, buffer, 16384);
