@@ -71,7 +71,7 @@ int forward_file(int fd, const char *fpath, const ForwardAddress &address) {
       fnodes[i - 1].port = address[i].second;
       printf("ip %u port %u\n", fnodes[i - 1].ip, fnodes[i - 1].port);
     }
-    write_len = write(fd, (const void *)&fnodes, ttl * sizeof(ForwardNode));
+    write_len = write(fd, (const void *)fnodes, ttl * sizeof(ForwardNode));
     if (write_len != ttl * sizeof(ForwardNode)) {
       printf("write error, %d %d\n", write_len, errno);
       ret = -1;
