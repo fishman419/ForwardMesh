@@ -53,7 +53,7 @@ int forward_next(int fd, ForwardRequest *req, ForwardNode *nodes,
   int ret;
   int next_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (next_fd < 0) {
-    printf("socket error, %d\n", errno);
+    printf("[FWDD]socket error, %d\n", errno);
     return -1;
   }
   struct sockaddr_in dst_addr;
@@ -62,26 +62,26 @@ int forward_next(int fd, ForwardRequest *req, ForwardNode *nodes,
   dst_addr.sin_addr.s_addr = nodes[0].ip;
 
   if (connect(next_fd, (struct sockaddr *)&dst_addr, sizeof(dst_addr)) < 0) {
-    printf("connect error, %d\n", errno);
+    printf("[FWDD]connect error, %d\n", errno);
     return -1;
   }
   req->length -= sizeof(ForwardNode);
   req->ttl -= 1;
   ret = write(next_fd, req, sizeof(ForwardRequest));
   if (ret != sizeof(ForwardRequest)) {
-    printf("write error %d\n", errno);
+    printf("[FWDD]write error %d\n", errno);
     return -1;
   }
   if (req->ttl) {
     ret = write(next_fd, nodes + 1, sizeof(ForwardNode) * req->ttl);
     if (ret != sizeof(ForwardNode) * req->ttl) {
-      printf("write error %d\n", errno);
+      printf("[FWDD]write error %d\n", errno);
       return -1;
     }
   }
   ret = write(next_fd, fmeta, sizeof(ForwardFile) + fmeta->length);
   if (ret != sizeof(ForwardFile) + fmeta->length) {
-    printf("write error %d\n", errno);
+    printf("[FWDD]write error %d\n", errno);
     return -1;
   }
 
@@ -93,6 +93,7 @@ int forward_next(int fd, ForwardRequest *req, ForwardNode *nodes,
     return -1;
   }
 
+  printf("[FWDD]forward data success\n");
   close(next_fd);
   return 0;
 }
@@ -176,7 +177,7 @@ int forward_loop(int port) {
     fmeta->length = f_length;
     ret = recv_sync(fd, fmeta->filename, f_length);
     if (ret) {
-      printf("recv file name error\n");
+      printf("[FWDD]recv file name error\n");
       return -1;
     }
     if (req.ttl > 0) {
