@@ -86,7 +86,7 @@ int forward_next(int fd, ForwardRequest *req, ForwardNode *nodes,
   }
 
   ret = forward_sync(fd, next_fd, req->length - sizeof(ForwardRequest) -
-                                      sizeof(ForwardNode) * req.ttl -
+                                      sizeof(ForwardNode) * req->ttl -
                                       sizeof(ForwardFile) - fmeta->length);
   if (ret) {
     printf("[FWDD]forward data error\n");
