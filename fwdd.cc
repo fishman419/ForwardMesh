@@ -64,6 +64,23 @@ int forward_next(int fd, ForwardRequest *req, ForwardNode *nodes,
   return 0;
 }
 
+int store_local(int fd, ForwardRequest *req, ForwardFile *fmeta) {
+  int w_fd = open((const char *)fmeta->filename, O_CREAT | O_RDWR, 0644);
+  if (w_fd < 0) {
+    printf("[FWDD]open error, %d\n", errno);
+    return -1;
+  }
+  ret = forward_sync(fd, w_fd, req->length - sizeof(ForwardRequest) -
+                                    sizeof(ForwardFile) - fmeta->length);
+  if (ret) {
+    printf("[FWDD]forward data error\n");
+    return -1;
+  }
+  printf("[FWDD]data write to %s success\n", fmeta->filename);
+  close(w_fd);
+  return 0;
+}
+
 int forward_loop(int port) {
   int ret;
   int sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -146,25 +163,12 @@ int forward_loop(int port) {
       printf("[FWDD]recv file name error\n");
       return -1;
     }
+    // Forward to next node
     if (req.ttl > 0) {
       forward_next(fd, &req, fnodes, fmeta);
       free(fnodes);
     } else {
-      // data
-      int w_fd = open((const char *)fmeta->filename, O_CREAT | O_RDWR, 0644);
-      if (w_fd < 0) {
-        printf("[FWDD]open error, %d\n", errno);
-        return -1;
-      }
-      ret = forward_sync(fd, w_fd, req.length - sizeof(ForwardRequest) -
-                                       sizeof(ForwardNode) * req.ttl -
-                                       sizeof(ForwardFile) - f_length);
-      if (ret) {
-        printf("[FWDD]forward data error\n");
-        return -1;
-      }
-      printf("[FWDD]data write to %s success\n", fmeta->filename);
-      close(w_fd);
+      store_local(fd, &req, fmeta);
     }
     free(fmeta);
     close(fd);
