@@ -84,7 +84,7 @@ int forward_file(int fd, const char *fpath, const ForwardAddress &address) {
     goto out;
   }
   // data
-  ret = forward_sync(r_fd, w_fd, f_size);
+  ret = forward_sync(r_fd, fd, f_size);
   if (ret) {
     printf("send file data error\n");
     goto out;
