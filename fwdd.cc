@@ -60,6 +60,7 @@ int forward_next(int fd, ForwardRequest *req, ForwardNode *nodes,
   }
 
   printf("[FWDD]forward data success\n");
+  // TODO(yyt): wait for response from next and send response to prev
   close(next_fd);
   return 0;
 }
@@ -70,14 +71,15 @@ int store_local(int fd, ForwardRequest *req, ForwardFile *fmeta) {
     printf("[FWDD]open error, %d\n", errno);
     return -1;
   }
-  ret = forward_sync(fd, w_fd, req->length - sizeof(ForwardRequest) -
-                                    sizeof(ForwardFile) - fmeta->length);
+  int ret = forward_sync(fd, w_fd, req->length - sizeof(ForwardRequest) -
+                                       sizeof(ForwardFile) - fmeta->length);
   if (ret) {
     printf("[FWDD]forward data error\n");
     return -1;
   }
   printf("[FWDD]data write to %s success\n", fmeta->filename);
   close(w_fd);
+  // TODO(yyt): send response to prev
   return 0;
 }
 
