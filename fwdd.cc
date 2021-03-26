@@ -151,7 +151,7 @@ int forward_loop(int port) {
     }
     printf(
         "[FWDD][header]length %d, magic %d, version %d, cmd %d, ttl %d, id "
-        "%llu\n",
+        "%lu\n",
         req.length, req.magic, req.version, req.cmd, req.ttl, req.id);
     // ForwardNode
     if (req.ttl) {
