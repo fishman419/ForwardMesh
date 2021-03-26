@@ -14,13 +14,12 @@
 #include <utility>
 
 #include "protocol.h"
+#include "util.h"
 
 typedef std::vector<std::pair<uint32_t, uint32_t>> ForwardAddress;
 
 int forward_file(int fd, const char *fpath, const ForwardAddress &address) {
   int r_fd = 0;
-  int read_len;
-  int write_len;
   int ret = 0;
   struct stat s;
   uint64_t f_size;
@@ -28,7 +27,6 @@ int forward_file(int fd, const char *fpath, const ForwardAddress &address) {
   ForwardRequest req;
   ForwardFile *fmeta = NULL;
   uint32_t fmeta_length;
-  char data[16384];
   uint32_t ttl = address.size() - 1;
   ForwardNode *fnodes = NULL;
   r_fd = open(fpath, O_RDONLY);
@@ -57,10 +55,9 @@ int forward_file(int fd, const char *fpath, const ForwardAddress &address) {
   req.cmd = ForwardPush;
   req.ttl = ttl;
   req.id = 0;
-  write_len = write(fd, (const void *)&req, sizeof(req));
-  if (write_len != sizeof(req)) {
-    printf("write error, %d %d\n", write_len, errno);
-    ret = -1;
+  ret = send_sync(fd, &req, sizeof(req));
+  if (ret) {
+    printf("send forward req error\n");
     goto out;
   }
   // ForwardNode
@@ -71,10 +68,9 @@ int forward_file(int fd, const char *fpath, const ForwardAddress &address) {
       fnodes[i - 1].port = address[i].second;
       printf("ip %u port %u\n", fnodes[i - 1].ip, fnodes[i - 1].port);
     }
-    write_len = write(fd, (const void *)fnodes, ttl * sizeof(ForwardNode));
-    if (write_len != ttl * sizeof(ForwardNode)) {
-      printf("write error, %d %d\n", write_len, errno);
-      ret = -1;
+    ret = send_sync(fd, fnodes, ttl * sizeof(ForwardNode));
+    if (ret) {
+      printf("send forward nodes error\n");
       goto out;
     }
   }
@@ -82,27 +78,16 @@ int forward_file(int fd, const char *fpath, const ForwardAddress &address) {
   fmeta = (ForwardFile *)malloc(fmeta_length);
   fmeta->length = strlen(filename) + 1;
   strncpy((char *)fmeta->filename, filename, strlen(filename));
-  write_len = write(fd, fmeta, fmeta_length);
-  if (write_len != fmeta_length) {
-    printf("write error, %d %d\n", write_len, errno);
-    ret = -1;
+  ret = send_sync(fd, fmeta, fmeta_length);
+  if (ret) {
+    printf("send file meta error\n");
     goto out;
   }
   // data
-  while (f_size > 0) {
-    read_len = read(r_fd, data, sizeof(data));
-    if (read_len < 0) {
-      printf("read error, %d\n", errno);
-      ret = -1;
-      goto out;
-    }
-    f_size -= read_len;
-    write_len = write(fd, data, read_len);
-    if (write_len != read_len) {
-      printf("write error, %d %d\n", write_len, errno);
-      ret = -1;
-      goto out;
-    }
+  ret = forward_sync(r_fd, w_fd, f_size);
+  if (ret) {
+    printf("send file data error\n");
+    goto out;
   }
 
   printf("write success\n");

@@ -1,8 +1,8 @@
 CXX=g++
 CXXFLAGS=-std=c++11 -I.
-DEPS = protocol.h
-OBJ_FWDD = fwdd.o
-OBJ_FWD = fwd.o
+DEPS = protocol.h util.h
+OBJ_FWDD = fwdd.o util.o
+OBJ_FWD = fwd.o util.o
 
 %.o: %.c $(DEPS)
 	$(CXX) -c -o $@ $< $(CXXFLAGS)
