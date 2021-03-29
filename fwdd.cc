@@ -17,6 +17,8 @@
 int forward_next(int fd, ForwardRequest *req, ForwardNode *nodes,
                  ForwardFile *fmeta) {
   int ret;
+  ForwardRequest next_req;
+  ForwardResponse res;
   int next_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (next_fd < 0) {
     printf("[FWDD]socket error, %d\n", errno);
@@ -31,16 +33,17 @@ int forward_next(int fd, ForwardRequest *req, ForwardNode *nodes,
     printf("[FWDD]connect error, %d\n", errno);
     return -1;
   }
-  req->length -= sizeof(ForwardNode);
-  req->ttl -= 1;
-  ret = write(next_fd, req, sizeof(ForwardRequest));
+  memcpy(&next_req, req, sizeof(next_req));
+  next_req.length -= sizeof(ForwardNode);
+  next_req.ttl -= 1;
+  ret = write(next_fd, &next_req, sizeof(ForwardRequest));
   if (ret != sizeof(ForwardRequest)) {
     printf("[FWDD]write error %d\n", errno);
     return -1;
   }
-  if (req->ttl) {
-    ret = write(next_fd, nodes + 1, sizeof(ForwardNode) * req->ttl);
-    if (ret != sizeof(ForwardNode) * req->ttl) {
+  if (next_req.ttl) {
+    ret = write(next_fd, nodes + 1, sizeof(ForwardNode) * next_req.ttl);
+    if (ret != sizeof(ForwardNode) * next_req.ttl) {
       printf("[FWDD]write error %d\n", errno);
       return -1;
     }
@@ -51,8 +54,8 @@ int forward_next(int fd, ForwardRequest *req, ForwardNode *nodes,
     return -1;
   }
 
-  ret = forward_sync(fd, next_fd, req->length - sizeof(ForwardRequest) -
-                                      sizeof(ForwardNode) * req->ttl -
+  ret = forward_sync(fd, next_fd, next_req.length - sizeof(ForwardRequest) -
+                                      sizeof(ForwardNode) * next_req.ttl -
                                       sizeof(ForwardFile) - fmeta->length);
   if (ret) {
     printf("[FWDD]forward data error\n");
@@ -61,11 +64,35 @@ int forward_next(int fd, ForwardRequest *req, ForwardNode *nodes,
 
   printf("[FWDD]forward data success\n");
   // TODO(yyt): wait for response from next and send response to prev
+  ret = recv_sync(next_fd, &res, sizeof(res));
+  if (ret) {
+    printf("[FWDD]recv response error\n");
+    return -1;
+  }
+  if (res.retcode == ForwardSuccess) {
+    res.length = sizeof(res);
+    res.magic = kForwardMagic;
+    res.version = kForwardVersion1;
+    res.cmd = req->cmd;
+    res.ttl = req->ttl;
+    res.retcode = ForwardSuccess;
+    res.id = req->id;
+    ret = send_sync(fd, &res, sizeof(res));
+    if (ret) {
+      printf("[FWDD]send response error\n");
+      return -1;
+    }
+    printf("[FWDD]send response success\n");
+  } else {
+    printf("[FWDD]response error, retcode %d\n", res.retcode);
+    return -1;
+  }
   close(next_fd);
   return 0;
 }
 
 int store_local(int fd, ForwardRequest *req, ForwardFile *fmeta) {
+  ForwardResponse res;
   int w_fd = open((const char *)fmeta->filename, O_CREAT | O_RDWR, 0644);
   if (w_fd < 0) {
     printf("[FWDD]open error, %d\n", errno);
@@ -79,7 +106,19 @@ int store_local(int fd, ForwardRequest *req, ForwardFile *fmeta) {
   }
   printf("[FWDD]data write to %s success\n", fmeta->filename);
   close(w_fd);
-  // TODO(yyt): send response to prev
+  res.length = sizeof(res);
+  res.magic = kForwardMagic;
+  res.version = kForwardVersion1;
+  res.cmd = req->cmd;
+  res.ttl = req->ttl;
+  res.retcode = ForwardSuccess;
+  res.id = req->id;
+  ret = send_sync(fd, &res, sizeof(res));
+  if (ret) {
+    printf("[FWDD]send response error\n");
+    return -1;
+  }
+  printf("[FWDD]send response success\n");
   return 0;
 }
 

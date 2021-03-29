@@ -25,6 +25,7 @@ int forward_file(int fd, const char *fpath, const ForwardAddress &address) {
   uint64_t f_size;
   const char *filename;
   ForwardRequest req;
+  ForwardResponse res;
   ForwardFile *fmeta = NULL;
   uint32_t fmeta_length;
   uint32_t ttl = address.size() - 1;
@@ -89,8 +90,18 @@ int forward_file(int fd, const char *fpath, const ForwardAddress &address) {
     printf("send file data error\n");
     goto out;
   }
+  // wait res
+  ret = recv_sync(fd, &res, sizeof(res));
+  if (ret) {
+    printf("recv res error\n");
+    goto out;
+  }
+  if (res.retcode == ForwardSuccess) {
+    printf("forward success\n");
+  } else {
+    printf("forward failed, retcode %d\n", res.retcode);
+  }
 
-  printf("write success\n");
 out:
   if (r_fd) {
     close(r_fd);
