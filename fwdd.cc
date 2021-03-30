@@ -130,7 +130,7 @@ int store_local(int fd, ForwardRequest *req, ForwardFile *fmeta) {
     ret = -1;
     goto out;
   }
-  syslog(LOG_INFO, "store %s to local\n", fmeta->filename);
+  syslog(LOG_INFO, "store file(%s) to local\n", fmeta->filename);
 out:
   if (w_fd > 0) {
     close(w_fd);
