@@ -97,8 +97,8 @@ int store_local(int fd, ForwardRequest *req, ForwardFile *fmeta) {
     ret = -1;
     goto out;
   }
-  int ret = forward_sync(fd, w_fd, req->length - sizeof(ForwardRequest) -
-                                       sizeof(ForwardFile) - fmeta->length);
+  ret = forward_sync(fd, w_fd, req->length - sizeof(ForwardRequest) -
+                                   sizeof(ForwardFile) - fmeta->length);
   if (ret) {
     printf("[FWDD]forward data error\n");
     ret = -1;
