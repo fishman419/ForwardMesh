@@ -20,6 +20,7 @@ enum ForwardRetcode {
   ForwardInterrupt = 1,
   ForwardUnreachable = 2,
   ForwardInternalError = 3,
+  ForwardRetcodeMax,
 };
 
 enum ForwardCommand {

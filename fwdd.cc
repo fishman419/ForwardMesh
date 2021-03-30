@@ -173,8 +173,8 @@ int forward_loop(int port) {
       return -1;
     }
     inet_ntop(AF_INET, &src_addr.sin_addr, ip_str, sizeof(ip_str));
-    printf("[FWDD]accept %d, ip: %s, port: %d\n", fd, ip_str,
-           ntohs(src_addr.sin_port));
+    // printf("[FWDD]accept %d, ip: %s, port: %d\n", fd, ip_str,
+    //        ntohs(src_addr.sin_port));
     ret = recv_sync(fd, &req, sizeof(uint32_t));
     if (ret) {
       printf("[FWDD]recv req size\n");
@@ -187,10 +187,10 @@ int forward_loop(int port) {
       printf("[FWDD]recv req error\n");
       return -1;
     }
-    printf(
-        "[FWDD][header]length %d, magic %d, version %d, cmd %d, ttl %d, id "
-        "%lu\n",
-        req.length, req.magic, req.version, req.cmd, req.ttl, req.id);
+    // printf(
+    //     "[FWDD][header]length %d, magic %d, version %d, cmd %d, ttl %d, id "
+    //     "%lu\n",
+    //     req.length, req.magic, req.version, req.cmd, req.ttl, req.id);
     // ForwardNode
     if (req.ttl) {
       fnodes = (ForwardNode *)malloc(sizeof(ForwardNode) * req.ttl);
@@ -199,10 +199,10 @@ int forward_loop(int port) {
         printf("[FWDD]recv nodes error\n");
         return -1;
       }
-      for (uint32_t i = 0; i < req.ttl; ++i) {
-        printf("[FWDD][node%u]ip %u, port %u\n", i, fnodes[i].ip,
-               fnodes[i].port);
-      }
+      // for (uint32_t i = 0; i < req.ttl; ++i) {
+      //   printf("[FWDD][node%u]ip %u, port %u\n", i, fnodes[i].ip,
+      //          fnodes[i].port);
+      // }
     }
     // ForwardFile
     uint32_t f_length;
