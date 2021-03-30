@@ -130,6 +130,7 @@ int store_local(int fd, ForwardRequest *req, ForwardFile *fmeta) {
     ret = -1;
     goto out;
   }
+  syslog(LOG_INFO, "store %s to local\n", fmeta->filename);
 out:
   if (w_fd > 0) {
     close(w_fd);
@@ -174,8 +175,8 @@ int forward_loop(int port) {
       return -1;
     }
     inet_ntop(AF_INET, &src_addr.sin_addr, ip_str, sizeof(ip_str));
-    // printf("accept %d, ip: %s, port: %d\n", fd, ip_str,
-    //        ntohs(src_addr.sin_port));
+    syslog(LOG_DEBUG, "accept %d, ip: %s, port: %d\n", fd, ip_str,
+           ntohs(src_addr.sin_port));
     ret = recv_sync(fd, &req, sizeof(uint32_t));
     if (ret) {
       syslog(LOG_ERR, "recv req size\n");
@@ -188,10 +189,10 @@ int forward_loop(int port) {
       syslog(LOG_ERR, "recv req error\n");
       return -1;
     }
-    // printf(
-    //     "[header]length %d, magic %d, version %d, cmd %d, ttl %d, id "
-    //     "%lu\n",
-    //     req.length, req.magic, req.version, req.cmd, req.ttl, req.id);
+    syslog(LOG_DEBUG,
+           "[header]length %d, magic %d, version %d, cmd %d, ttl %d, id "
+           "%lu\n",
+           req.length, req.magic, req.version, req.cmd, req.ttl, req.id);
     // ForwardNode
     if (req.ttl) {
       fnodes = (ForwardNode *)malloc(sizeof(ForwardNode) * req.ttl);
@@ -200,10 +201,10 @@ int forward_loop(int port) {
         syslog(LOG_ERR, "recv nodes error\n");
         return -1;
       }
-      // for (uint32_t i = 0; i < req.ttl; ++i) {
-      //   printf("[node%u]ip %u, port %u\n", i, fnodes[i].ip,
-      //          fnodes[i].port);
-      // }
+      for (uint32_t i = 0; i < req.ttl; ++i) {
+        syslog(LOG_DEBUG, "[node%u]ip %u, port %u\n", i, fnodes[i].ip,
+               fnodes[i].port);
+      }
     }
     // ForwardFile
     uint32_t f_length;
@@ -292,6 +293,7 @@ int main(int argc, char *argv[]) {
   } else {
     chdir("/");
   }
+  openlog(NULL, LOG_CONS | LOG_PID | LOG_NDELAY, LOG_LOCAL1);
   syslog(LOG_INFO, "forward daemon start\n");
   return forward_loop(port);
 }
