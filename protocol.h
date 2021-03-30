@@ -17,7 +17,9 @@ const uint8_t kMaxForwardTTL = 32;
 
 enum ForwardRetcode {
   ForwardSuccess = 0,
-  ForwardUnreachable = 1
+  ForwardInterrupt = 1,
+  ForwardUnreachable = 2,
+  ForwardInternalError = 3,
 };
 
 enum ForwardCommand {

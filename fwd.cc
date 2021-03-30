@@ -103,7 +103,7 @@ int forward_file(int fd, const char *fpath, const ForwardAddress &address) {
   }
 
 out:
-  if (r_fd) {
+  if (r_fd > 0) {
     close(r_fd);
   }
   if (fnodes) {
