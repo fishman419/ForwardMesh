@@ -260,6 +260,9 @@ int main(int argc, char *argv[]) {
         return -1;
     }
   }
+  if (!dir) {
+    dir = strdup("/");
+  }
   pid_t pid;
   pid = fork();
   if (pid < 0) {
@@ -287,13 +290,9 @@ int main(int argc, char *argv[]) {
     return 0;
   }
   umask(0);
-  if (dir) {
-    chdir(dir);
-    free(dir);
-  } else {
-    chdir("/");
-  }
+  chdir(dir);
   openlog(NULL, LOG_CONS | LOG_PID | LOG_NDELAY, LOG_LOCAL1);
-  syslog(LOG_INFO, "forward daemon start\n");
+  syslog(LOG_INFO, "forward daemon start, working directory: %s\n", dir);
+  free(dir);
   return forward_loop(port);
 }
