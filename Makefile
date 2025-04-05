@@ -1,6 +1,6 @@
 CXX=g++
-CXXFLAGS=-std=c++11 -I.
-DEPS = protocol.h util.h logger.h
+CXXFLAGS=-std=c++11 -I./src
+DEPS = src/protocol.h src/util.h src/logger.h
 
 BUILD_DIR = build
 BIN_DIR = bin
@@ -11,7 +11,7 @@ TARGET = $(BIN_DIR)/fwdd $(BIN_DIR)/fwd
 
 $(shell mkdir -p $(BUILD_DIR) $(BIN_DIR))
 
-$(BUILD_DIR)/%.o: %.cc $(DEPS)
+$(BUILD_DIR)/%.o: src/%.cc $(DEPS)
 	$(CXX) -c -o $@ $< $(CXXFLAGS)
 
 all: $(TARGET)
