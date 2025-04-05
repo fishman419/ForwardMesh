@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "logger.h"
 #include "protocol.h"
 #include "util.h"
 
@@ -33,12 +34,12 @@ int forward_file(int fd, const char *fpath, const ForwardAddress &address) {
   ForwardNode *fnodes = NULL;
   r_fd = open(fpath, O_RDONLY);
   if (r_fd < 0) {
-    printf("open file error, %d\n", errno);
+    LOG_ERROR("open file error, %d", errno);
     ret = -1;
     goto out;
   }
   if (stat(fpath, &s)) {
-    printf("stat error, fpath %s, %d\n", fpath, errno);
+    LOG_ERROR("stat error, fpath %s, %d", fpath, errno);
     ret = -1;
     goto out;
   }
@@ -104,9 +105,9 @@ int forward_file(int fd, const char *fpath, const ForwardAddress &address) {
     goto out;
   }
   if (res.retcode == ForwardSuccess) {
-    printf("forward success\n");
+    LOG_INFO("forward success");
   } else {
-    printf("forward failed, retcode %d\n", res.retcode);
+    LOG_ERROR("forward failed, retcode %d", res.retcode);
   }
 
 out:
@@ -143,7 +144,7 @@ int resolve_address(char *raw_str, ForwardAddress *res) {
     }
     uint32_t ip;
     if (inet_pton(AF_INET, addr.substr(0, port_pos).c_str(), &ip) < 0) {
-      printf("ip address is invalid, %s\n", addr.substr(0, port_pos).c_str());
+      LOG_ERROR("ip address is invalid, %s", addr.substr(0, port_pos).c_str());
       return -1;
     }
     res->emplace_back(ip, port);
@@ -152,9 +153,18 @@ int resolve_address(char *raw_str, ForwardAddress *res) {
 }
 
 int main(int argc, char *argv[]) {
+  int ret = log_init("forward_client.log");
+  if (ret) {
+    return -1;
+  }
+
+  atexit(log_close);
+
   int opt;
   ForwardAddress forward_address;
   char *fpath = NULL;
+
+  LOG_INFO("Forward client started");
   while ((opt = getopt(argc, argv, "a:f:")) != -1) {
     switch (opt) {
       case 'a':
@@ -195,7 +205,7 @@ int main(int argc, char *argv[]) {
   // 在main函数中修改socket创建部分
   int sockfd = socket(AF_INET, SOCK_STREAM, 0);
   if (sockfd < 0) {
-    printf("socket error, %d\n", errno);
+    LOG_ERROR("socket error, %d", errno);
     return -1;
   }
 

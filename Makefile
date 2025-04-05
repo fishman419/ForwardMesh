@@ -1,12 +1,12 @@
 CXX=g++
 CXXFLAGS=-std=c++11 -I.
-DEPS = protocol.h util.h
+DEPS = protocol.h util.h logger.h
 
 BUILD_DIR = build
 BIN_DIR = bin
 
-OBJ_FWDD = $(BUILD_DIR)/fwdd.o $(BUILD_DIR)/util.o
-OBJ_FWD = $(BUILD_DIR)/fwd.o $(BUILD_DIR)/util.o
+OBJ_FWDD = $(BUILD_DIR)/fwdd.o $(BUILD_DIR)/util.o $(BUILD_DIR)/logger.o
+OBJ_FWD = $(BUILD_DIR)/fwd.o $(BUILD_DIR)/util.o $(BUILD_DIR)/logger.o
 TARGET = $(BIN_DIR)/fwdd $(BIN_DIR)/fwd
 
 $(shell mkdir -p $(BUILD_DIR) $(BIN_DIR))
