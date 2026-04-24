@@ -167,7 +167,7 @@ int main(int argc, char *argv[]) {
   char *fpath = NULL;
 
   LOG_INFO("Forward client started");
-  while ((opt = getopt(argc, argv, "a:f:")) != -1) {
+  while ((opt = getopt(argc, argv, "a:f:h")) != -1) {
     switch (opt) {
       case 'a':
         if (resolve_address(optarg, &forward_address)) {
@@ -191,11 +191,19 @@ int main(int argc, char *argv[]) {
           return -1;
         }
         break;
+      case 'h':
+        printf("Usage: %s -a ip:port,... -f file [options]\n", argv[0]);
+        printf("  -a addr : comma-separated list of ip:port forwarding chain\n");
+        printf("  -f file : file to forward\n");
+        printf("  -h      : show this help\n");
+        printf("Example: %s -a 127.0.0.1:40000,127.0.0.1:40001 -f test.txt\n", argv[0]);
+        return 0;
       default:
-        printf("Usage: %s <-a ip[:port],ip[:port],...ip[:port]> <-f file>\n",
-               argv[0]);
-        printf("Example: %s -a 127.0.0.1:40000,127.0.0.1:40001 -f testfile\n",
-               argv[0]);
+        printf("Usage: %s -a ip:port,... -f file [options]\n", argv[0]);
+        printf("  -a addr : comma-separated list of ip:port forwarding chain\n");
+        printf("  -f file : file to forward\n");
+        printf("  -h      : show this help\n");
+        printf("Example: %s -a 127.0.0.1:40000,127.0.0.1:40001 -f test.txt\n", argv[0]);
         return -1;
     }
   }

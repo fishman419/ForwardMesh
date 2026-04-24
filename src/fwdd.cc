@@ -177,10 +177,11 @@ int forward_loop(int port) {
     char ip_str[64];
     ForwardRequest req;
     ForwardNode *fnodes = NULL;
+    ForwardFile *fmeta = NULL;
     int fd = accept(sockfd, (struct sockaddr *)&src_addr, &addr_len);
     if (fd < 0) {
       LOG_ERROR("accept error, %d", errno);
-      return -1;
+      continue;
     }
     inet_ntop(AF_INET, &src_addr.sin_addr, ip_str, sizeof(ip_str));
     LOG_DEBUG("accept %d, ip: %s, port: %d", fd, ip_str,
@@ -188,14 +189,14 @@ int forward_loop(int port) {
     ret = recv_sync(fd, &req, sizeof(uint32_t));
     if (ret) {
       LOG_ERROR("recv req size");
-      return -1;
+      goto cleanup_fd;
     }
     // ForwardRequest
     ret = recv_sync(fd, (char *)&req + sizeof(uint32_t),
                     sizeof(ForwardRequest) - sizeof(uint32_t));
     if (ret) {
       LOG_ERROR("recv req error");
-      return -1;
+      goto cleanup_fd;
     }
     LOG_DEBUG(
         "[header]length %d, magic %d, version %d, cmd %d, ttl %d, id "
@@ -204,10 +205,14 @@ int forward_loop(int port) {
     // ForwardNode
     if (req.ttl) {
       fnodes = (ForwardNode *)malloc(sizeof(ForwardNode) * req.ttl);
+      if (!fnodes) {
+        LOG_ERROR("malloc fnodes error");
+        goto cleanup_fd;
+      }
       ret = recv_sync(fd, fnodes, sizeof(ForwardNode) * req.ttl);
       if (ret) {
         LOG_ERROR("recv nodes error");
-        return -1;
+        goto cleanup_fnodes;
       }
       for (uint32_t i = 0; i < req.ttl; ++i) {
         LOG_DEBUG("[node%u]ip %u, port %u", i, fnodes[i].ip, fnodes[i].port);
@@ -218,24 +223,35 @@ int forward_loop(int port) {
     ret = recv_sync(fd, &f_length, sizeof(uint32_t));
     if (ret) {
       LOG_ERROR("recv file size error");
-      return -1;
+      goto cleanup_fnodes;
     }
-    ForwardFile *fmeta = (ForwardFile *)malloc(sizeof(ForwardFile) + f_length);
+    fmeta = (ForwardFile *)malloc(sizeof(ForwardFile) + f_length);
+    if (!fmeta) {
+      LOG_ERROR("malloc fmeta error");
+      goto cleanup_fnodes;
+    }
     fmeta->length = f_length;
     ret = recv_sync(fd, fmeta->filename, f_length);
     if (ret) {
       LOG_ERROR("recv file name error");
-      return -1;
+      goto cleanup_fmeta;
     }
     // Forward to next node
     if (req.ttl > 0) {
-      forward_next(fd, &req, fnodes, fmeta);
-      free(fnodes);
+      ret = forward_next(fd, &req, fnodes, fmeta);
     } else {
-      store_local(fd, &req, fmeta);
+      ret = store_local(fd, &req, fmeta);
     }
+
+cleanup_fmeta:
     free(fmeta);
+    fmeta = NULL;
+cleanup_fnodes:
+    free(fnodes);
+    fnodes = NULL;
+cleanup_fd:
     close(fd);
+    continue;
   }
   return 0;
 }
@@ -245,7 +261,7 @@ int main(int argc, char *argv[]) {
   int port = kDefaultPort;
   char *dir = NULL;
 
-  while ((opt = getopt(argc, argv, "p:d:")) != -1) {
+  while ((opt = getopt(argc, argv, "p:d:h")) != -1) {
     switch (opt) {
       case 'p':
         port = atoi(optarg);
@@ -254,17 +270,25 @@ int main(int argc, char *argv[]) {
         dir = strdup(optarg);
         struct stat s;
         if (stat(dir, &s)) {
-          printf("stat error, dir %s, %d\n", dir, errno);
+          LOG_ERROR("stat error, dir %s, %d", dir, errno);
           return -1;
         }
         if (!S_ISDIR(s.st_mode)) {
-          printf("input dir is not directory, dir %s, mode %d\n", dir,
-                 s.st_mode);
+          LOG_ERROR("input dir is not directory, dir %s, mode %d", dir, s.st_mode);
           return -1;
         }
         break;
+      case 'h':
+        printf("Usage: %s [-p port] [-d dir]\n", argv[0]);
+        printf("  -p port  : specify port (default %d)\n", kDefaultPort);
+        printf("  -d dir   : specify working directory\n");
+        printf("  -h       : show this help\n");
+        return 0;
       default:
         printf("Usage: %s [-p port] [-d dir]\n", argv[0]);
+        printf("  -p port  : specify port (default %d)\n", kDefaultPort);
+        printf("  -d dir   : specify working directory\n");
+        printf("  -h       : show this help\n");
         return -1;
     }
   }
@@ -280,10 +304,9 @@ int main(int argc, char *argv[]) {
   atexit(log_close);
 
   LOG_INFO("Forward daemon started, working directory: %s", dir);
-  pid_t pid;
-  pid = fork();
+  pid_t pid = fork();
   if (pid < 0) {
-    printf("fork error, %d\n", errno);
+    LOG_ERROR("fork error, %d", errno);
     return -1;
   }
   // parent
@@ -292,18 +315,17 @@ int main(int argc, char *argv[]) {
     return 0;
   }
   if (setsid() < 0) {
-    printf("setsid error, %d\n", errno);
+    LOG_ERROR("setsid error, %d", errno);
     return -1;
   }
   signal(SIGCHLD, SIG_IGN);
   signal(SIGHUP, SIG_IGN);
   pid = fork();
   if (pid < 0) {
-    printf("fork error, %d\n", errno);
+    LOG_ERROR("fork error, %d", errno);
     return -1;
   }
   if (pid > 0) {
-    // printf("parent exit, child pid: %d\n", pid);
     return 0;
   }
   umask(0);
