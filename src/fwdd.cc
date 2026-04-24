@@ -22,8 +22,8 @@
 #define PLATFORM_LINUX 1
 #endif
 
-int forward_next(int fd, ForwardRequest *req, ForwardNode *nodes,
-                 ForwardFile *fmeta) {
+int ForwardNext(int fd, ForwardRequest *req, ForwardNode *nodes,
+                ForwardFile *fmeta) {
   int ret;
   ForwardRequest next_req;
   ForwardResponse res;
@@ -48,7 +48,7 @@ int forward_next(int fd, ForwardRequest *req, ForwardNode *nodes,
   memcpy(&next_req, req, sizeof(next_req));
   next_req.length -= sizeof(ForwardNode);
   next_req.ttl -= 1;
-  ret = send_sync(next_fd, &next_req, sizeof(ForwardRequest));
+  ret = SendSync(next_fd, &next_req, sizeof(ForwardRequest));
   if (ret) {
     LOG_ERROR("send forward req error %d", errno);
     ret = -1;
@@ -56,7 +56,7 @@ int forward_next(int fd, ForwardRequest *req, ForwardNode *nodes,
     goto out_response;
   }
   if (next_req.ttl) {
-    ret = send_sync(next_fd, nodes + 1, sizeof(ForwardNode) * next_req.ttl);
+    ret = SendSync(next_fd, nodes + 1, sizeof(ForwardNode) * next_req.ttl);
     if (ret) {
       LOG_ERROR("send forward nodes error %d", errno);
       ret = -1;
@@ -64,7 +64,7 @@ int forward_next(int fd, ForwardRequest *req, ForwardNode *nodes,
       goto out_response;
     }
   }
-  ret = send_sync(next_fd, fmeta, sizeof(ForwardFile) + fmeta->length);
+  ret = SendSync(next_fd, fmeta, sizeof(ForwardFile) + fmeta->length);
   if (ret) {
     LOG_ERROR("send forward file error");
     ret = -1;
@@ -72,7 +72,7 @@ int forward_next(int fd, ForwardRequest *req, ForwardNode *nodes,
     goto out_response;
   }
 
-  ret = forward_sync(fd, next_fd,
+  ret = ForwardSync(fd, next_fd,
                      next_req.length - sizeof(ForwardRequest) -
                          sizeof(ForwardNode) * next_req.ttl -
                          sizeof(ForwardFile) - fmeta->length);
@@ -83,7 +83,7 @@ int forward_next(int fd, ForwardRequest *req, ForwardNode *nodes,
     goto out_response;
   }
 
-  ret = recv_sync(next_fd, &res, sizeof(res));
+  ret = RecvSync(next_fd, &res, sizeof(res));
   if (ret) {
     LOG_ERROR("recv response error");
     ret = -1;
@@ -97,7 +97,7 @@ out_response:
   res.cmd = req->cmd;
   res.ttl = req->ttl;
   res.id = req->id;
-  ret = send_sync(fd, &res, sizeof(res));
+  ret = SendSync(fd, &res, sizeof(res));
   if (ret) {
     LOG_ERROR("send response error");
     ret = -1;
@@ -109,7 +109,7 @@ out:
   return ret;
 }
 
-int store_local(int fd, ForwardRequest *req, ForwardFile *fmeta) {
+int StoreLocal(int fd, ForwardRequest *req, ForwardFile *fmeta) {
   ForwardResponse res;
   int ret = 0;
   int w_fd =
@@ -118,7 +118,7 @@ int store_local(int fd, ForwardRequest *req, ForwardFile *fmeta) {
     LOG_ERROR("open error, %d", errno);
     return -1;
   }
-  ret = forward_sync(fd, w_fd,
+  ret = ForwardSync(fd, w_fd,
                      req->length - sizeof(ForwardRequest) -
                          sizeof(ForwardFile) - fmeta->length);
   if (ret) {
@@ -134,7 +134,7 @@ int store_local(int fd, ForwardRequest *req, ForwardFile *fmeta) {
   res.ttl = req->ttl;
   res.retcode = ForwardSuccess;
   res.id = req->id;
-  ret = send_sync(fd, &res, sizeof(res));
+  ret = SendSync(fd, &res, sizeof(res));
   if (ret) {
     LOG_ERROR("send response error");
     ret = -1;
@@ -148,7 +148,7 @@ out:
   return ret;
 }
 
-int forward_loop(int port) {
+int ForwardLoop(int port) {
   int ret;
   int sockfd = socket(AF_INET, SOCK_STREAM, 0);
   if (sockfd < 0) {
@@ -187,13 +187,13 @@ int forward_loop(int port) {
     inet_ntop(AF_INET, &src_addr.sin_addr, ip_str, sizeof(ip_str));
     LOG_DEBUG("accept %d, ip: %s, port: %d", fd, ip_str,
               ntohs(src_addr.sin_port));
-    ret = recv_sync(fd, &req, sizeof(uint32_t));
+    ret = RecvSync(fd, &req, sizeof(uint32_t));
     if (ret) {
       LOG_ERROR("recv req size");
       goto cleanup_fd;
     }
     // ForwardRequest
-    ret = recv_sync(fd, (char *)&req + sizeof(uint32_t),
+    ret = RecvSync(fd, (char *)&req + sizeof(uint32_t),
                     sizeof(ForwardRequest) - sizeof(uint32_t));
     if (ret) {
       LOG_ERROR("recv req error");
@@ -210,7 +210,7 @@ int forward_loop(int port) {
         LOG_ERROR("malloc fnodes error");
         goto cleanup_fd;
       }
-      ret = recv_sync(fd, fnodes, sizeof(ForwardNode) * req.ttl);
+      ret = RecvSync(fd, fnodes, sizeof(ForwardNode) * req.ttl);
       if (ret) {
         LOG_ERROR("recv nodes error");
         goto cleanup_fnodes;
@@ -221,7 +221,7 @@ int forward_loop(int port) {
     }
     // ForwardFile
     uint32_t f_length;
-    ret = recv_sync(fd, &f_length, sizeof(uint32_t));
+    ret = RecvSync(fd, &f_length, sizeof(uint32_t));
     if (ret) {
       LOG_ERROR("recv file size error");
       goto cleanup_fnodes;
@@ -232,16 +232,16 @@ int forward_loop(int port) {
       goto cleanup_fnodes;
     }
     fmeta->length = f_length;
-    ret = recv_sync(fd, fmeta->filename, f_length);
+    ret = RecvSync(fd, fmeta->filename, f_length);
     if (ret) {
       LOG_ERROR("recv file name error");
       goto cleanup_fmeta;
     }
     // Forward to next node
     if (req.ttl > 0) {
-      ret = forward_next(fd, &req, fnodes, fmeta);
+      ret = ForwardNext(fd, &req, fnodes, fmeta);
     } else {
-      ret = store_local(fd, &req, fmeta);
+      ret = StoreLocal(fd, &req, fmeta);
     }
 
   cleanup_fmeta:
@@ -299,11 +299,11 @@ int main(int argc, char *argv[]) {
   }
   char log_path[PATH_MAX];
   snprintf(log_path, sizeof(log_path), "%s/forward_server.log", dir);
-  int ret = log_init(log_path);
+  int ret = LogInit(log_path);
   if (ret) {
     return -1;
   }
-  atexit(log_close);
+  atexit(LogClose);
 
   LOG_INFO("Forward daemon started, working directory: %s", dir);
   pid_t pid = fork();
@@ -333,5 +333,5 @@ int main(int argc, char *argv[]) {
   umask(0);
   chdir(dir);
   free(dir);
-  return forward_loop(port);
+  return ForwardLoop(port);
 }

@@ -20,7 +20,7 @@
 
 typedef std::vector<std::pair<uint32_t, uint32_t>> ForwardAddress;
 
-int forward_file(int fd, const char *fpath, const ForwardAddress &address) {
+int SendFile(int fd, const char *fpath, const ForwardAddress &address) {
   int r_fd = 0;
   int ret = 0;
   struct stat s;
@@ -59,7 +59,7 @@ int forward_file(int fd, const char *fpath, const ForwardAddress &address) {
   req.cmd = ForwardPush;
   req.ttl = ttl;
   req.id = 0;
-  ret = send_sync(fd, &req, sizeof(req));
+  ret = SendSync(fd, &req, sizeof(req));
   if (ret) {
     LOG_ERROR("send forward req error");
     goto out;
@@ -72,7 +72,7 @@ int forward_file(int fd, const char *fpath, const ForwardAddress &address) {
       fnodes[i - 1].port = address[i].second;
       LOG_DEBUG("ip %u port %u", fnodes[i - 1].ip, fnodes[i - 1].port);
     }
-    ret = send_sync(fd, fnodes, ttl * sizeof(ForwardNode));
+    ret = SendSync(fd, fnodes, ttl * sizeof(ForwardNode));
     if (ret) {
       LOG_ERROR("send forward nodes error");
       goto out;
@@ -89,19 +89,19 @@ int forward_file(int fd, const char *fpath, const ForwardAddress &address) {
   fmeta->length = fname_len + 1;
   strncpy((char *)fmeta->filename, filename, fname_len);
   fmeta->filename[fname_len] = '\0';
-  ret = send_sync(fd, fmeta, fmeta_length);
+  ret = SendSync(fd, fmeta, fmeta_length);
   if (ret) {
     LOG_ERROR("send file meta error");
     goto out;
   }
   // data
-  ret = forward_sync(r_fd, fd, f_size);
+  ret = ForwardSync(r_fd, fd, f_size);
   if (ret) {
     LOG_ERROR("send file data error");
     goto out;
   }
   // wait res
-  ret = recv_sync(fd, &res, sizeof(res));
+  ret = RecvSync(fd, &res, sizeof(res));
   if (ret) {
     LOG_ERROR("recv res error");
     goto out;
@@ -125,7 +125,7 @@ out:
   return ret;
 }
 
-int resolve_address(char *raw_str, ForwardAddress *res) {
+int ResolveAddress(char *raw_str, ForwardAddress *res) {
   std::string cxx_str(raw_str);
   size_t pos = 0;
   size_t next = 0;
@@ -155,12 +155,12 @@ int resolve_address(char *raw_str, ForwardAddress *res) {
 }
 
 int main(int argc, char *argv[]) {
-  int ret = log_init("forward_client.log");
+  int ret = LogInit("forward_client.log");
   if (ret) {
     return -1;
   }
 
-  atexit(log_close);
+  atexit(LogClose);
 
   int opt;
   ForwardAddress forward_address;
@@ -170,7 +170,7 @@ int main(int argc, char *argv[]) {
   while ((opt = getopt(argc, argv, "a:f:h")) != -1) {
     switch (opt) {
       case 'a':
-        if (resolve_address(optarg, &forward_address)) {
+        if (ResolveAddress(optarg, &forward_address)) {
           LOG_ERROR("invalid address format");
           return -1;
         }
@@ -239,7 +239,7 @@ int main(int argc, char *argv[]) {
     return -1;
   }
 
-  if (forward_file(sockfd, fpath, forward_address)) {
+  if (SendFile(sockfd, fpath, forward_address)) {
     LOG_ERROR("forward file error");
     close(sockfd);
     return -1;

@@ -11,13 +11,13 @@ typedef enum { LOG_DEBUG, LOG_INFO, LOG_WARNING, LOG_ERROR } LogLevel;
 
 extern FILE* log_file;
 
-int log_init(const char* filename);
-void log_close();
-void log_write(LogLevel level, const char* format, ...);
+int LogInit(const char *filename);
+void LogClose();
+void LogWrite(LogLevel level, const char *format, ...);
 
-#define LOG_DEBUG(...) log_write(LOG_DEBUG, __VA_ARGS__)
-#define LOG_INFO(...) log_write(LOG_INFO, __VA_ARGS__)
-#define LOG_WARNING(...) log_write(LOG_WARNING, __VA_ARGS__)
-#define LOG_ERROR(...) log_write(LOG_ERROR, __VA_ARGS__)
+#define LOG_DEBUG(...) LogWrite(LOG_DEBUG, __VA_ARGS__)
+#define LOG_INFO(...) LogWrite(LOG_INFO, __VA_ARGS__)
+#define LOG_WARNING(...) LogWrite(LOG_WARNING, __VA_ARGS__)
+#define LOG_ERROR(...) LogWrite(LOG_ERROR, __VA_ARGS__)
 
 #endif  // LOGGER_H

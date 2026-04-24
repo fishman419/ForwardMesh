@@ -5,9 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-FILE* log_file = NULL;
+FILE *log_file = NULL;
 
-int log_init(const char* filename) {
+int LogInit(const char *filename) {
   if (log_file) {
     fclose(log_file);
   }
@@ -22,14 +22,14 @@ int log_init(const char* filename) {
   return 0;
 }
 
-void log_close() {
+void LogClose() {
   if (log_file) {
     fclose(log_file);
     log_file = NULL;
   }
 }
 
-void log_write(LogLevel level, const char* format, ...) {
+void LogWrite(LogLevel level, const char *format, ...) {
   if (!log_file) return;
 
   time_t now;

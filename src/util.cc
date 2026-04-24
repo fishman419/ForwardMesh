@@ -4,7 +4,7 @@
 
 #include "logger.h"
 
-int send_sync(int fd, void *buffer, int len) {
+int SendSync(int fd, void *buffer, int len) {
   int ret;
   int offset = 0;
   while (len > 0) {
@@ -19,7 +19,7 @@ int send_sync(int fd, void *buffer, int len) {
   return 0;
 }
 
-int recv_sync(int fd, void *buffer, int len) {
+int RecvSync(int fd, void *buffer, int len) {
   int ret;
   int offset = 0;
   while (len > 0) {
@@ -34,7 +34,7 @@ int recv_sync(int fd, void *buffer, int len) {
   return 0;
 }
 
-int forward_sync(int fd_src, int fd_dst, int len) {
+int ForwardSync(int fd_src, int fd_dst, int len) {
   char buffer[16384];
   int ret;
   while (len > 0) {
