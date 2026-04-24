@@ -187,23 +187,28 @@ int main(int argc, char *argv[]) {
           return -1;
         }
         if (!S_ISREG(s.st_mode)) {
-          LOG_ERROR("input file is not regular file, fpath %s, mode %d", fpath, s.st_mode);
+          LOG_ERROR("input file is not regular file, fpath %s, mode %d", fpath,
+                    s.st_mode);
           return -1;
         }
         break;
       case 'h':
         printf("Usage: %s -a ip:port,... -f file [options]\n", argv[0]);
-        printf("  -a addr : comma-separated list of ip:port forwarding chain\n");
+        printf(
+            "  -a addr : comma-separated list of ip:port forwarding chain\n");
         printf("  -f file : file to forward\n");
         printf("  -h      : show this help\n");
-        printf("Example: %s -a 127.0.0.1:40000,127.0.0.1:40001 -f test.txt\n", argv[0]);
+        printf("Example: %s -a 127.0.0.1:40000,127.0.0.1:40001 -f test.txt\n",
+               argv[0]);
         return 0;
       default:
         printf("Usage: %s -a ip:port,... -f file [options]\n", argv[0]);
-        printf("  -a addr : comma-separated list of ip:port forwarding chain\n");
+        printf(
+            "  -a addr : comma-separated list of ip:port forwarding chain\n");
         printf("  -f file : file to forward\n");
         printf("  -h      : show this help\n");
-        printf("Example: %s -a 127.0.0.1:40000,127.0.0.1:40001 -f test.txt\n", argv[0]);
+        printf("Example: %s -a 127.0.0.1:40000,127.0.0.1:40001 -f test.txt\n",
+               argv[0]);
         return -1;
     }
   }

@@ -112,7 +112,8 @@ out:
 int store_local(int fd, ForwardRequest *req, ForwardFile *fmeta) {
   ForwardResponse res;
   int ret = 0;
-  int w_fd = open((const char *)fmeta->filename, O_CREAT | O_RDWR, kDefaultFileMode);
+  int w_fd =
+      open((const char *)fmeta->filename, O_CREAT | O_RDWR, kDefaultFileMode);
   if (w_fd < 0) {
     LOG_ERROR("open error, %d", errno);
     return -1;
@@ -243,13 +244,13 @@ int forward_loop(int port) {
       ret = store_local(fd, &req, fmeta);
     }
 
-cleanup_fmeta:
+  cleanup_fmeta:
     free(fmeta);
     fmeta = NULL;
-cleanup_fnodes:
+  cleanup_fnodes:
     free(fnodes);
     fnodes = NULL;
-cleanup_fd:
+  cleanup_fd:
     close(fd);
     continue;
   }
@@ -274,7 +275,8 @@ int main(int argc, char *argv[]) {
           return -1;
         }
         if (!S_ISDIR(s.st_mode)) {
-          LOG_ERROR("input dir is not directory, dir %s, mode %d", dir, s.st_mode);
+          LOG_ERROR("input dir is not directory, dir %s, mode %d", dir,
+                    s.st_mode);
           return -1;
         }
         break;

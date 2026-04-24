@@ -27,10 +27,7 @@ enum ForwardRetcode {
   ForwardRetcodeMax,
 };
 
-enum ForwardCommand {
-  ForwardPull = 0,
-  ForwardPush = 1
-};
+enum ForwardCommand { ForwardPull = 0, ForwardPush = 1 };
 
 struct ForwardNode {
   uint32_t ip;

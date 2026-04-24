@@ -1,9 +1,9 @@
 #include "logger.h"
 
+#include <errno.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
 
 FILE* log_file = NULL;
 
