@@ -1,6 +1,7 @@
 #ifndef PROTOCOL_H_
 #define PROTOCOL_H_
 
+#include <stddef.h>
 #include <stdint.h>
 
 // packet format:
@@ -14,6 +15,9 @@ const uint32_t kDefaultPort = 40000;
 const uint32_t kForwardMagic = 0xFF44AADD;
 const uint8_t kForwardVersion1 = 1;
 const uint8_t kMaxForwardTTL = 32;
+const int kDefaultBacklog = 5;
+const int kDefaultFileMode = 0644;
+const size_t kForwardBufSize = 16384;
 
 enum ForwardRetcode {
   ForwardSuccess = 0,

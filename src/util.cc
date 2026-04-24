@@ -37,19 +37,21 @@ int recv_sync(int fd, void *buffer, int len) {
 int forward_sync(int fd_src, int fd_dst, int len) {
   char buffer[16384];
   int ret;
-  int write_len;
   while (len > 0) {
     ret = read(fd_src, buffer, 16384);
     if (ret < 0) {
       LOG_ERROR("[UTIL]read error, %d", errno);
       return -1;
     }
-    write_len = write(fd_dst, buffer, ret);
-    if (ret < 0) {
-      LOG_ERROR("[UTIL]write error, %d %d", write_len, errno);
+    if (ret == 0) {
+      break;
+    }
+    int write_len = write(fd_dst, buffer, ret);
+    if (write_len < 0) {
+      LOG_ERROR("[UTIL]write error, %d", errno);
       return -1;
     }
-    len -= ret;
+    len -= write_len;
   }
   return 0;
 }

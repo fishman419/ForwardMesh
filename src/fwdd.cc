@@ -1,6 +1,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdio.h>
@@ -111,7 +112,7 @@ out:
 int store_local(int fd, ForwardRequest *req, ForwardFile *fmeta) {
   ForwardResponse res;
   int ret = 0;
-  int w_fd = open((const char *)fmeta->filename, O_CREAT | O_RDWR, 0644);
+  int w_fd = open((const char *)fmeta->filename, O_CREAT | O_RDWR, kDefaultFileMode);
   if (w_fd < 0) {
     LOG_ERROR("open error, %d", errno);
     return -1;
@@ -166,13 +167,13 @@ int forward_loop(int port) {
     LOG_ERROR("bind error, %d", errno);
     return -1;
   }
-  if (listen(sockfd, 5)) {
+  if (listen(sockfd, kDefaultBacklog)) {
     LOG_ERROR("listen error, %d", errno);
     return -1;
   }
   while (1) {
     struct sockaddr_in src_addr;
-    socklen_t addr_len;
+    socklen_t addr_len = sizeof(src_addr);
     char ip_str[64];
     ForwardRequest req;
     ForwardNode *fnodes = NULL;

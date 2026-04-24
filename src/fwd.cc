@@ -30,6 +30,7 @@ int forward_file(int fd, const char *fpath, const ForwardAddress &address) {
   ForwardResponse res;
   ForwardFile *fmeta = NULL;
   uint32_t fmeta_length;
+  size_t fname_len = 0;
   uint32_t ttl = address.size() - 1;
   ForwardNode *fnodes = NULL;
   r_fd = open(fpath, O_RDONLY);
@@ -60,7 +61,7 @@ int forward_file(int fd, const char *fpath, const ForwardAddress &address) {
   req.id = 0;
   ret = send_sync(fd, &req, sizeof(req));
   if (ret) {
-    printf("send forward req error\n");
+    LOG_ERROR("send forward req error");
     goto out;
   }
   // ForwardNode
@@ -69,43 +70,44 @@ int forward_file(int fd, const char *fpath, const ForwardAddress &address) {
     for (uint32_t i = 1; i < address.size(); ++i) {
       fnodes[i - 1].ip = address[i].first;
       fnodes[i - 1].port = address[i].second;
-      printf("ip %u port %u\n", fnodes[i - 1].ip, fnodes[i - 1].port);
+      LOG_DEBUG("ip %u port %u", fnodes[i - 1].ip, fnodes[i - 1].port);
     }
     ret = send_sync(fd, fnodes, ttl * sizeof(ForwardNode));
     if (ret) {
-      printf("send forward nodes error\n");
+      LOG_ERROR("send forward nodes error");
       goto out;
     }
   }
 
   fmeta = (ForwardFile *)malloc(fmeta_length);
   if (!fmeta) {
-    printf("malloc error\n");
+    LOG_ERROR("malloc error");
     ret = -1;
     goto out;
   }
-  fmeta->length = strlen(filename) + 1;
-  strncpy((char *)fmeta->filename, filename, strlen(filename));
-  fmeta->filename[strlen(filename)] = '\0';
+  fname_len = strlen(filename);
+  fmeta->length = fname_len + 1;
+  strncpy((char *)fmeta->filename, filename, fname_len);
+  fmeta->filename[fname_len] = '\0';
   ret = send_sync(fd, fmeta, fmeta_length);
   if (ret) {
-    printf("send file meta error\n");
+    LOG_ERROR("send file meta error");
     goto out;
   }
   // data
   ret = forward_sync(r_fd, fd, f_size);
   if (ret) {
-    printf("send file data error\n");
+    LOG_ERROR("send file data error");
     goto out;
   }
   // wait res
   ret = recv_sync(fd, &res, sizeof(res));
   if (ret) {
-    printf("recv res error\n");
+    LOG_ERROR("recv res error");
     goto out;
   }
   if (res.retcode == ForwardSuccess) {
-    LOG_INFO("forward success");
+    LOG_DEBUG("forward success");
   } else {
     LOG_ERROR("forward failed, retcode %d", res.retcode);
   }
@@ -169,11 +171,11 @@ int main(int argc, char *argv[]) {
     switch (opt) {
       case 'a':
         if (resolve_address(optarg, &forward_address)) {
-          printf("invalid address format\n");
+          LOG_ERROR("invalid address format");
           return -1;
         }
         if (forward_address.empty()) {
-          printf("no address parsed\n");
+          LOG_ERROR("no address parsed");
           return -1;
         }
         break;
@@ -181,12 +183,11 @@ int main(int argc, char *argv[]) {
         fpath = strdup(optarg);
         struct stat s;
         if (stat(fpath, &s)) {
-          printf("stat error, fpath %s, %d\n", fpath, errno);
+          LOG_ERROR("stat error, fpath %s, %d", fpath, errno);
           return -1;
         }
         if (!S_ISREG(s.st_mode)) {
-          printf("input file is not regular file, fpath %s, mode %d\n", fpath,
-                 s.st_mode);
+          LOG_ERROR("input file is not regular file, fpath %s, mode %d", fpath, s.st_mode);
           return -1;
         }
         break;
@@ -199,20 +200,18 @@ int main(int argc, char *argv[]) {
     }
   }
   if (!fpath) {
-    printf("please input file\n");
+    LOG_ERROR("please input file");
     return -1;
   }
-  // 在main函数中修改socket创建部分
   int sockfd = socket(AF_INET, SOCK_STREAM, 0);
   if (sockfd < 0) {
     LOG_ERROR("socket error, %d", errno);
     return -1;
   }
 
-  // 添加socket选项确保可移植性
   int optval = 1;
   if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval))) {
-    printf("setsockopt error, %d\n", errno);
+    LOG_ERROR("setsockopt error, %d", errno);
     close(sockfd);
     return -1;
   }
@@ -222,12 +221,14 @@ int main(int argc, char *argv[]) {
   dst_addr.sin_addr.s_addr = forward_address[0].first;
 
   if (connect(sockfd, (struct sockaddr *)&dst_addr, sizeof(dst_addr)) < 0) {
-    printf("connect error, %d\n", errno);
+    LOG_ERROR("connect error, %d", errno);
+    close(sockfd);
     return -1;
   }
 
   if (forward_file(sockfd, fpath, forward_address)) {
-    printf("forward file error\n");
+    LOG_ERROR("forward file error");
+    close(sockfd);
     return -1;
   }
   close(sockfd);
