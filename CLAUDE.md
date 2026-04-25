@@ -2,12 +2,6 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project Overview
-
-ForwardMesh is a file forwarding system that routes data through a chain of nodes based on an IP list. It consists of two binaries:
-- `fwdd` - server daemon that receives and forwards files
-- `fwd` - client that sends files through the forwarding chain
-
 ## Build Commands
 
 ```bash
@@ -24,9 +18,21 @@ make -f Makefile.optimized debug
 make clean
 ```
 
-## Code Architecture
+## Testing
 
-### Protocol Stack
+```bash
+# Run all tests
+./tests/test_basic.sh
+
+# Run memory leak tests (macOS)
+make leaks-check
+
+# Run ASAN tests (Linux only - macOS has ASAN + fork + threads issues)
+make asan-test
+```
+
+## Protocol Stack
+
 The protocol uses a packet format: `ForwardHead + ForwardNode[n] + ForwardFile + data`
 
 When forwarding through a node, the TTL decrements and one ForwardNode is consumed:
@@ -38,40 +44,49 @@ Key constants in `src/protocol.h`:
 - Magic: `0xFF44AADD`, Version: `1`
 - Default port: `40000`
 - Max TTL: `32`
+- Buffer size: `16384`
 
-### Core Components
+Commands: `ForwardPull` (cmd=0) requests file from final destination, `ForwardPush` (cmd=1) sends file through chain.
 
-**src/protocol.h** - Protocol structures (ForwardRequest, ForwardResponse, ForwardNode, ForwardFile). All structures are packed with `__attribute__((packed))`.
+## Architecture
 
-**src/fwdd.cc** - Server implementation with daemonize logic (double-fork), signal handling (SIGCHLD/SIGHUP ignored), and main event loop via `forward_loop()`. Handles two modes:
-- `forward_next()` - Forward to next node in chain
-- `store_local()` - Write file to disk when TTL reaches 0
+**fwdd** (server daemon):
+- Double-fork daemonize with SIGCHLD/SIGHUP ignored
+- Thread pool model: `ForwardLoop(port, num_threads)` creates worker threads that process requests asynchronously
+- Main thread handles `accept()` and dispatches connections to thread pool via mutex-protected queue
+- Worker threads (`WorkerThread()`) pull tasks from queue and process concurrently
+- `ForwardNext()` - store-and-forward to next node (uses temp file for buffering)
+- `StoreLocal()` - write file to disk when TTL reaches 0
+- `PullForward()` / `PullFileToClient()` - pull mode handlers
 
-**src/fwd.cc** - Client implementation. Parses comma-separated address list and sends file through the forwarding chain.
+**fwd** (client):
+- `SendFile()` - push mode: sends file through forwarding chain
+- `PullFile()` - pull mode: request file from final node and receive it back
+- `ResolveAddress()` - parses comma-separated ip:port chain
 
-**src/util.cc** - Sync I/O utilities: `send_sync()`, `recv_sync()`, `forward_sync()` (relay data between fds).
+**util.cc** - Sync I/O: `SendSync()`, `RecvSync()`, `ForwardSync()` (relay data between fds), `MakeResponse()`
 
-**src/logger.h/cc** - Logging with levels (DEBUG/INFO/WARNING/ERROR), writes to `forward_server.log` by default.
-
-### File Structure
-```
-src/
-  fwdd.cc          # Server (daemon)
-  fwd.cc           # Client
-  fwdd_optimized.cc # Alternative optimized server (referenced in Makefile.optimized)
-  util.cc          # I/O utilities
-  protocol.h       # Protocol structures
-  logger.h/cc      # Logging module
-```
-
-## Running
+## Usage Examples
 
 **Server:**
 ```bash
-./fwdd [-d /path/to/store] [-p port]
+./bin/fwdd [-p port] [-d dir] [-t threads]
 ```
 
-**Client:**
+**Client push (send file through chain):**
 ```bash
-./fwd -a ip:port,ip:port,... -f /path/to/file
+# Single node
+./bin/fwd -a 127.0.0.1:40000 -f test.txt
+
+# Multi-node chain
+./bin/fwd -a 127.0.0.1:40000,127.0.0.1:40001,127.0.0.1:40002 -f test.txt
+```
+
+**Client pull (get file from final node):**
+```bash
+# Single node
+./bin/fwd -a 127.0.0.1:40000 -g /path/to/remote.txt -f local.txt
+
+# Multi-node chain
+./bin/fwd -a 127.0.0.1:40000,127.0.0.1:40001,127.0.0.1:40002 -g /path/file.txt -f local.txt
 ```

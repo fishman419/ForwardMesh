@@ -11,16 +11,31 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <condition_variable>
+#include <mutex>
+#include <queue>
+#include <thread>
 
 #include "logger.h"
 #include "protocol.h"
 #include "util.h"
+
+static std::queue<int> g_task_queue;
+static std::mutex g_queue_mutex;
+static std::condition_variable g_queue_cv;
+static bool g_shutdown = false;
 
 #if defined(__APPLE__)
 #define PLATFORM_MACOS 1
 #elif defined(__linux__)
 #define PLATFORM_LINUX 1
 #endif
+
+// Forward declarations for worker thread
+static int ForwardNext(int fd, ForwardRequest *req, ForwardNode *nodes, ForwardFile *fmeta);
+static int PullForward(int fd, ForwardRequest *req, ForwardNode *nodes, ForwardFile *fmeta);
+static int StoreLocal(int fd, ForwardRequest *req, ForwardFile *fmeta);
+static int PullFileToClient(int fd, ForwardRequest *req, ForwardFile *fmeta);
 
 // StoreAndForward: receives data from src_fd, stores locally at fmeta->filename,
 // then forwards the same data to dst_fd. Returns 0 on success, -1 on error.
@@ -104,6 +119,97 @@ static int StoreAndForward(int src_fd, int dst_fd, ForwardFile *fmeta, uint32_t 
 
   LOG_INFO("forwarded %u bytes", data_len);
   return 0;
+}
+
+static void WorkerThread() {
+  while (true) {
+    int fd;
+    {
+      std::unique_lock<std::mutex> lock(g_queue_mutex);
+      g_queue_cv.wait(lock, [] { return !g_task_queue.empty() || g_shutdown; });
+      if (g_shutdown && g_task_queue.empty()) {
+        return;
+      }
+      fd = g_task_queue.front();
+      g_task_queue.pop();
+    }
+    // Handle client request in worker thread
+    ForwardResponse res;
+    int ret = 0;
+    ForwardRequest req;
+    ForwardNode *fnodes = NULL;
+    ForwardFile *fmeta = NULL;
+
+    ret = RecvSync(fd, &req, sizeof(uint32_t));
+    if (ret) {
+      LOG_ERROR("recv req size");
+      goto cleanup_fd;
+    }
+    ret = RecvSync(fd, (char *)&req + sizeof(uint32_t),
+                    sizeof(ForwardRequest) - sizeof(uint32_t));
+    if (ret) {
+      LOG_ERROR("recv req error");
+      goto cleanup_fd;
+    }
+    LOG_DEBUG(
+        "[header]length %d, magic %d, version %d, cmd %d, ttl %d, id "
+        "%llu",
+        req.length, req.magic, req.version, req.cmd, req.ttl, req.id);
+    if (req.ttl) {
+      fnodes = (ForwardNode *)malloc(sizeof(ForwardNode) * req.ttl);
+      if (!fnodes) {
+        LOG_ERROR("malloc fnodes error");
+        goto cleanup_fd;
+      }
+      ret = RecvSync(fd, fnodes, sizeof(ForwardNode) * req.ttl);
+      if (ret) {
+        LOG_ERROR("recv nodes error");
+        goto cleanup_fnodes;
+      }
+      for (uint32_t i = 0; i < req.ttl; ++i) {
+        LOG_DEBUG("[node%u]ip %u, port %u", i, fnodes[i].ip, fnodes[i].port);
+      }
+    }
+    uint32_t f_length;
+    ret = RecvSync(fd, &f_length, sizeof(uint32_t));
+    if (ret) {
+      LOG_ERROR("recv file size error");
+      goto cleanup_fnodes;
+    }
+    fmeta = (ForwardFile *)malloc(sizeof(ForwardFile) + f_length);
+    if (!fmeta) {
+      LOG_ERROR("malloc fmeta error");
+      goto cleanup_fnodes;
+    }
+    fmeta->length = f_length;
+    ret = RecvSync(fd, fmeta->filename, f_length);
+    if (ret) {
+      LOG_ERROR("recv file name error");
+      goto cleanup_fmeta;
+    }
+    if (req.cmd == ForwardPull) {
+      if (req.ttl > 0) {
+        ret = PullForward(fd, &req, fnodes, fmeta);
+      } else {
+        ret = PullFileToClient(fd, &req, fmeta);
+      }
+    } else {
+      if (req.ttl > 0) {
+        ret = ForwardNext(fd, &req, fnodes, fmeta);
+      } else {
+        ret = StoreLocal(fd, &req, fmeta);
+      }
+    }
+
+  cleanup_fmeta:
+    free(fmeta);
+    fmeta = NULL;
+  cleanup_fnodes:
+    free(fnodes);
+    fnodes = NULL;
+  cleanup_fd:
+    close(fd);
+  }
 }
 
 int ForwardNext(int fd, ForwardRequest *req, ForwardNode *nodes,
@@ -410,16 +516,31 @@ int PullFileToClient(int fd, ForwardRequest *req, ForwardFile *fmeta) {
   return 0;
 }
 
-int ForwardLoop(int port) {
-  int ret;
+int ForwardLoop(int port, int num_threads) {
+  std::vector<std::thread> workers;
+  for (int i = 0; i < num_threads; ++i) {
+    workers.emplace_back(WorkerThread);
+  }
+
   int sockfd = socket(AF_INET, SOCK_STREAM, 0);
   if (sockfd < 0) {
     LOG_ERROR("socket error, %d", errno);
+    g_shutdown = true;
+    g_queue_cv.notify_all();
+    for (auto &t : workers) {
+      t.join();
+    }
     return -1;
   }
   int optval = 1;
   if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval))) {
     LOG_ERROR("setsockopt error, %d", errno);
+    close(sockfd);
+    g_shutdown = true;
+    g_queue_cv.notify_all();
+    for (auto &t : workers) {
+      t.join();
+    }
     return -1;
   }
   struct sockaddr_in address;
@@ -429,19 +550,31 @@ int ForwardLoop(int port) {
   address.sin_port = htons(port);
   if (bind(sockfd, (struct sockaddr *)&address, sizeof(address))) {
     LOG_ERROR("bind error, %d", errno);
+    close(sockfd);
+    g_shutdown = true;
+    g_queue_cv.notify_all();
+    for (auto &t : workers) {
+      t.join();
+    }
     return -1;
   }
   if (listen(sockfd, kDefaultBacklog)) {
     LOG_ERROR("listen error, %d", errno);
+    close(sockfd);
+    g_shutdown = true;
+    g_queue_cv.notify_all();
+    for (auto &t : workers) {
+      t.join();
+    }
     return -1;
   }
-  while (1) {
+
+  LOG_INFO("Forward daemon started with %d worker threads", num_threads);
+
+  while (true) {
     struct sockaddr_in src_addr;
     socklen_t addr_len = sizeof(src_addr);
     char ip_str[64];
-    ForwardRequest req;
-    ForwardNode *fnodes = NULL;
-    ForwardFile *fmeta = NULL;
     int fd = accept(sockfd, (struct sockaddr *)&src_addr, &addr_len);
     if (fd < 0) {
       LOG_ERROR("accept error, %d", errno);
@@ -450,90 +583,21 @@ int ForwardLoop(int port) {
     inet_ntop(AF_INET, &src_addr.sin_addr, ip_str, sizeof(ip_str));
     LOG_DEBUG("accept %d, ip: %s, port: %d", fd, ip_str,
               ntohs(src_addr.sin_port));
-    ret = RecvSync(fd, &req, sizeof(uint32_t));
-    if (ret) {
-      LOG_ERROR("recv req size");
-      goto cleanup_fd;
+    {
+      std::lock_guard<std::mutex> lock(g_queue_mutex);
+      g_task_queue.push(fd);
     }
-    // ForwardRequest
-    ret = RecvSync(fd, (char *)&req + sizeof(uint32_t),
-                    sizeof(ForwardRequest) - sizeof(uint32_t));
-    if (ret) {
-      LOG_ERROR("recv req error");
-      goto cleanup_fd;
-    }
-    LOG_DEBUG(
-        "[header]length %d, magic %d, version %d, cmd %d, ttl %d, id "
-        "%llu",
-        req.length, req.magic, req.version, req.cmd, req.ttl, req.id);
-    // ForwardNode
-    if (req.ttl) {
-      fnodes = (ForwardNode *)malloc(sizeof(ForwardNode) * req.ttl);
-      if (!fnodes) {
-        LOG_ERROR("malloc fnodes error");
-        goto cleanup_fd;
-      }
-      ret = RecvSync(fd, fnodes, sizeof(ForwardNode) * req.ttl);
-      if (ret) {
-        LOG_ERROR("recv nodes error");
-        goto cleanup_fnodes;
-      }
-      for (uint32_t i = 0; i < req.ttl; ++i) {
-        LOG_DEBUG("[node%u]ip %u, port %u", i, fnodes[i].ip, fnodes[i].port);
-      }
-    }
-    // ForwardFile
-    uint32_t f_length;
-    ret = RecvSync(fd, &f_length, sizeof(uint32_t));
-    if (ret) {
-      LOG_ERROR("recv file size error");
-      goto cleanup_fnodes;
-    }
-    fmeta = (ForwardFile *)malloc(sizeof(ForwardFile) + f_length);
-    if (!fmeta) {
-      LOG_ERROR("malloc fmeta error");
-      goto cleanup_fnodes;
-    }
-    fmeta->length = f_length;
-    ret = RecvSync(fd, fmeta->filename, f_length);
-    if (ret) {
-      LOG_ERROR("recv file name error");
-      goto cleanup_fmeta;
-    }
-// Handle request based on command
-    if (req.cmd == ForwardPull) {
-      if (req.ttl > 0) {
-        ret = PullForward(fd, &req, fnodes, fmeta);
-      } else {
-        ret = PullFileToClient(fd, &req, fmeta);
-      }
-    } else {
-      if (req.ttl > 0) {
-        ret = ForwardNext(fd, &req, fnodes, fmeta);
-      } else {
-        ret = StoreLocal(fd, &req, fmeta);
-      }
-    }
-
-  cleanup_fmeta:
-    free(fmeta);
-    fmeta = NULL;
-  cleanup_fnodes:
-    free(fnodes);
-    fnodes = NULL;
-  cleanup_fd:
-    close(fd);
-    continue;
+    g_queue_cv.notify_one();
   }
-  return 0;
 }
 
 int main(int argc, char *argv[]) {
   int opt;
   int port = kDefaultPort;
   char *dir = NULL;
+  int num_threads = 4;
 
-  while ((opt = getopt(argc, argv, "p:d:h")) != -1) {
+  while ((opt = getopt(argc, argv, "p:d:t:h")) != -1) {
     switch (opt) {
       case 'p':
         port = atoi(optarg);
@@ -551,17 +615,26 @@ int main(int argc, char *argv[]) {
           return -1;
         }
         break;
+      case 't':
+        num_threads = atoi(optarg);
+        if (num_threads <= 0) {
+          LOG_ERROR("invalid thread count: %d", num_threads);
+          return -1;
+        }
+        break;
       case 'h':
-        printf("Usage: %s [-p port] [-d dir]\n", argv[0]);
-        printf("  -p port  : specify port (default %d)\n", kDefaultPort);
-        printf("  -d dir   : specify working directory\n");
-        printf("  -h       : show this help\n");
+        printf("Usage: %s [-p port] [-d dir] [-t threads] [-h]\n", argv[0]);
+        printf("  -p port     : specify port (default %d)\n", kDefaultPort);
+        printf("  -d dir      : specify working directory\n");
+        printf("  -t threads  : number of worker threads (default 4)\n");
+        printf("  -h          : show this help\n");
         return 0;
       default:
-        printf("Usage: %s [-p port] [-d dir]\n", argv[0]);
-        printf("  -p port  : specify port (default %d)\n", kDefaultPort);
-        printf("  -d dir   : specify working directory\n");
-        printf("  -h       : show this help\n");
+        printf("Usage: %s [-p port] [-d dir] [-t threads] [-h]\n", argv[0]);
+        printf("  -p port     : specify port (default %d)\n", kDefaultPort);
+        printf("  -d dir      : specify working directory\n");
+        printf("  -t threads  : number of worker threads (default 4)\n");
+        printf("  -h          : show this help\n");
         return -1;
     }
   }
@@ -604,5 +677,5 @@ int main(int argc, char *argv[]) {
   umask(0);
   chdir(dir);
   free(dir);
-  return ForwardLoop(port);
+  return ForwardLoop(port, num_threads);
 }
