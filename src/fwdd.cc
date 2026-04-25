@@ -91,13 +91,7 @@ int ForwardNext(int fd, ForwardRequest *req, ForwardNode *nodes,
     res.retcode = ForwardInterrupt;
   }
 out_response:
-  res.retcode = ForwardInternalError;
-  res.length = sizeof(res);
-  res.magic = kForwardMagic;
-  res.version = kForwardVersion1;
-  res.cmd = req->cmd;
-  res.ttl = req->ttl;
-  res.id = req->id;
+  MakeResponse(&res, req, res.retcode);
   ret = SendSync(fd, &res, sizeof(res));
   if (ret) {
     LOG_ERROR("send response error");
@@ -128,13 +122,7 @@ int StoreLocal(int fd, ForwardRequest *req, ForwardFile *fmeta) {
     goto out;
   }
   close(w_fd);
-  res.length = sizeof(res);
-  res.magic = kForwardMagic;
-  res.version = kForwardVersion1;
-  res.cmd = req->cmd;
-  res.ttl = req->ttl;
-  res.retcode = ForwardSuccess;
-  res.id = req->id;
+  MakeResponse(&res, req, ForwardSuccess);
   ret = SendSync(fd, &res, sizeof(res));
   if (ret) {
     LOG_ERROR("send response error");

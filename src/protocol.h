@@ -61,10 +61,4 @@ struct ForwardResponse {
   uint8_t data[0];
 } __attribute__((packed));
 
-uint32_t DataOffset(ForwardRequest *req) {
-  return sizeof(ForwardRequest) + req->ttl * sizeof(ForwardNode);
-}
-
-uint32_t DataOffset(ForwardResponse *res) { return sizeof(ForwardResponse); }
-
 #endif  // PROTOCOL_H_

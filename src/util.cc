@@ -3,6 +3,7 @@
 #include <unistd.h>
 
 #include "logger.h"
+#include "protocol.h"
 
 int SendSync(int fd, void *buffer, int len) {
   int ret;
@@ -35,10 +36,10 @@ int RecvSync(int fd, void *buffer, int len) {
 }
 
 int ForwardSync(int fd_src, int fd_dst, int len) {
-  char buffer[16384];
+  char buffer[kForwardBufSize];
   int ret;
   while (len > 0) {
-    ret = read(fd_src, buffer, 16384);
+    ret = read(fd_src, buffer, kForwardBufSize);
     if (ret < 0) {
       LOG_ERROR("[UTIL]read error, %d", errno);
       return -1;
@@ -54,4 +55,14 @@ int ForwardSync(int fd_src, int fd_dst, int len) {
     len -= write_len;
   }
   return 0;
+}
+
+void MakeResponse(ForwardResponse *res, ForwardRequest *req, uint8_t retcode) {
+  res->length = sizeof(ForwardResponse);
+  res->magic = kForwardMagic;
+  res->version = kForwardVersion1;
+  res->cmd = req->cmd;
+  res->ttl = req->ttl;
+  res->retcode = retcode;
+  res->id = req->id;
 }
