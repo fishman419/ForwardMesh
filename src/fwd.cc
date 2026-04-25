@@ -229,6 +229,7 @@ int main(int argc, char *argv[]) {
     return -1;
   }
   struct sockaddr_in dst_addr;
+  memset(&dst_addr, 0, sizeof(dst_addr));
   dst_addr.sin_family = AF_INET;
   dst_addr.sin_port = htons(forward_address[0].second);
   dst_addr.sin_addr.s_addr = forward_address[0].first;

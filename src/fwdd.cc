@@ -35,6 +35,7 @@ int ForwardNext(int fd, ForwardRequest *req, ForwardNode *nodes,
     goto out_response;
   }
   struct sockaddr_in dst_addr;
+  memset(&dst_addr, 0, sizeof(dst_addr));
   dst_addr.sin_family = AF_INET;
   dst_addr.sin_port = htons(nodes[0].port);
   dst_addr.sin_addr.s_addr = nodes[0].ip;
@@ -90,7 +91,7 @@ int ForwardNext(int fd, ForwardRequest *req, ForwardNode *nodes,
     res.retcode = ForwardInterrupt;
   }
 out_response:
-  // pass res.retcode
+  res.retcode = ForwardInternalError;
   res.length = sizeof(res);
   res.magic = kForwardMagic;
   res.version = kForwardVersion1;
@@ -161,6 +162,7 @@ int ForwardLoop(int port) {
     return -1;
   }
   struct sockaddr_in address;
+  memset(&address, 0, sizeof(address));
   address.sin_family = AF_INET;
   address.sin_addr.s_addr = htonl(INADDR_ANY);
   address.sin_port = htons(port);
