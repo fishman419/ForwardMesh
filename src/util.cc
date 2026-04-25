@@ -39,7 +39,8 @@ int ForwardSync(int fd_src, int fd_dst, int len) {
   char buffer[kForwardBufSize];
   int ret;
   while (len > 0) {
-    ret = read(fd_src, buffer, kForwardBufSize);
+    int read_len = len < kForwardBufSize ? len : kForwardBufSize;
+    ret = read(fd_src, buffer, read_len);
     if (ret < 0) {
       LOG_ERROR("[UTIL]read error, %d", errno);
       return -1;

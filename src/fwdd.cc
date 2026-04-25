@@ -22,11 +22,96 @@
 #define PLATFORM_LINUX 1
 #endif
 
+// StoreAndForward: receives data from src_fd, stores locally at fmeta->filename,
+// then forwards the same data to dst_fd. Returns 0 on success, -1 on error.
+static int StoreAndForward(int src_fd, int dst_fd, ForwardFile *fmeta, uint32_t data_len) {
+  char tmp_path[] = "/tmp/fwd_forward_XXXXXX";
+  int tmp_fd = mkstemp(tmp_path);
+  if (tmp_fd < 0) {
+    LOG_ERROR("mkstemp error, %d", errno);
+    return -1;
+  }
+
+  // Receive data from src and write to temp file
+  char buffer[kForwardBufSize];
+  uint32_t remaining = data_len;
+  while (remaining > 0) {
+    int recv_len = remaining < kForwardBufSize ? remaining : kForwardBufSize;
+    int ret = read(src_fd, buffer, recv_len);
+    if (ret < 0) {
+      LOG_ERROR("read error, %d", errno);
+      close(tmp_fd);
+      unlink(tmp_path);
+      return -1;
+    }
+    if (ret == 0) {
+      break;
+    }
+    int write_len = write(tmp_fd, buffer, ret);
+    if (write_len < 0) {
+      LOG_ERROR("write temp error, %d", errno);
+      close(tmp_fd);
+      unlink(tmp_path);
+      return -1;
+    }
+    remaining -= write_len;
+  }
+
+  // Store locally
+  int store_fd = open((const char *)fmeta->filename, O_CREAT | O_RDWR, kDefaultFileMode);
+  if (store_fd < 0) {
+    LOG_ERROR("open file error, %d", errno);
+    close(tmp_fd);
+    unlink(tmp_path);
+    return -1;
+  }
+  // Rewind temp file to beginning for reading
+  lseek(tmp_fd, 0, SEEK_SET);
+  int bytes_read;
+  while ((bytes_read = read(tmp_fd, buffer, kForwardBufSize)) > 0) {
+    int write_len = write(store_fd, buffer, bytes_read);
+    if (write_len < 0) {
+      LOG_ERROR("write store error, %d", errno);
+      close(store_fd);
+      close(tmp_fd);
+      unlink(tmp_path);
+      return -1;
+    }
+  }
+  close(store_fd);
+  LOG_INFO("stored %u bytes to %s", data_len, fmeta->filename);
+
+  // Forward to dst: rewind and send same data
+  lseek(tmp_fd, 0, SEEK_SET);
+  remaining = data_len;
+  while (remaining > 0) {
+    int send_len = remaining < kForwardBufSize ? remaining : kForwardBufSize;
+    int ret = read(tmp_fd, buffer, send_len);
+    if (ret <= 0) {
+      break;
+    }
+    int write_len = write(dst_fd, buffer, ret);
+    if (write_len < 0) {
+      LOG_ERROR("write dst error, %d", errno);
+      close(tmp_fd);
+      unlink(tmp_path);
+      return -1;
+    }
+    remaining -= write_len;
+  }
+  close(tmp_fd);
+  unlink(tmp_path);
+
+  LOG_INFO("forwarded %u bytes", data_len);
+  return 0;
+}
+
 int ForwardNext(int fd, ForwardRequest *req, ForwardNode *nodes,
                 ForwardFile *fmeta) {
   int ret;
   ForwardRequest next_req;
   ForwardResponse res;
+  uint32_t data_len = 0;
   int next_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (next_fd < 0) {
     LOG_ERROR("socket error, %d", errno);
@@ -73,12 +158,12 @@ int ForwardNext(int fd, ForwardRequest *req, ForwardNode *nodes,
     goto out_response;
   }
 
-  ret = ForwardSync(fd, next_fd,
-                     next_req.length - sizeof(ForwardRequest) -
-                         sizeof(ForwardNode) * next_req.ttl -
-                         sizeof(ForwardFile) - fmeta->length);
+  data_len = next_req.length - sizeof(ForwardRequest) -
+                      sizeof(ForwardNode) * next_req.ttl -
+                      sizeof(ForwardFile) - fmeta->length;
+  ret = StoreAndForward(fd, next_fd, fmeta, data_len);
   if (ret) {
-    LOG_ERROR("forward data error");
+    LOG_ERROR("store and forward error");
     ret = -1;
     res.retcode = ForwardInterrupt;
     goto out_response;
@@ -98,6 +183,127 @@ out_response:
     ret = -1;
   }
 out:
+  if (next_fd > 0) {
+    close(next_fd);
+  }
+  return ret;
+}
+
+int PullForward(int fd, ForwardRequest *req, ForwardNode *nodes,
+                ForwardFile *fmeta) {
+  int ret;
+  ForwardRequest next_req;
+  ForwardResponse res;
+  int next_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (next_fd < 0) {
+    LOG_ERROR("socket error, %d", errno);
+    ret = -1;
+    res.retcode = ForwardInternalError;
+    goto out_pull_response;
+  }
+  struct sockaddr_in dst_addr;
+  memset(&dst_addr, 0, sizeof(dst_addr));
+  dst_addr.sin_family = AF_INET;
+  dst_addr.sin_port = htons(nodes[0].port);
+  dst_addr.sin_addr.s_addr = nodes[0].ip;
+
+  if (connect(next_fd, (struct sockaddr *)&dst_addr, sizeof(dst_addr)) < 0) {
+    LOG_ERROR("connect error, %d", errno);
+    ret = -1;
+    res.retcode = ForwardUnreachable;
+    goto out_pull_response;
+  }
+
+  memcpy(&next_req, req, sizeof(next_req));
+  next_req.length -= sizeof(ForwardNode);
+  next_req.ttl -= 1;
+  ret = SendSync(next_fd, &next_req, sizeof(next_req));
+  if (ret) {
+    LOG_ERROR("send pull req error %d", errno);
+    ret = -1;
+    res.retcode = ForwardInterrupt;
+    goto out_pull_response;
+  }
+  if (next_req.ttl) {
+    ret = SendSync(next_fd, nodes + 1, sizeof(ForwardNode) * next_req.ttl);
+    if (ret) {
+      LOG_ERROR("send pull nodes error %d", errno);
+      ret = -1;
+      res.retcode = ForwardInterrupt;
+      goto out_pull_response;
+    }
+  }
+  ret = SendSync(next_fd, fmeta, sizeof(ForwardFile) + fmeta->length);
+  if (ret) {
+    LOG_ERROR("send pull fmeta error");
+    ret = -1;
+    res.retcode = ForwardInterrupt;
+    goto out_pull_response;
+  }
+
+  ForwardResponse pull_res;
+  ret = RecvSync(next_fd, &pull_res, sizeof(pull_res));
+  if (ret) {
+    LOG_ERROR("recv pull response error");
+    ret = -1;
+    res.retcode = ForwardInterrupt;
+    goto out_pull_response;
+  }
+
+  SendSync(fd, &pull_res, sizeof(pull_res));
+
+  if (pull_res.cmd == ForwardPush) {
+    ForwardFile pull_fmeta;
+    ret = RecvSync(next_fd, &pull_fmeta, sizeof(pull_fmeta));
+    if (ret) {
+      LOG_ERROR("recv pull fmeta error");
+      res.retcode = ForwardInterrupt;
+      goto out_pull_response;
+    }
+    uint32_t fmeta_total_len = sizeof(ForwardFile) + pull_fmeta.length;
+    ForwardFile *pull_fmeta_buf = (ForwardFile *)malloc(fmeta_total_len);
+    if (!pull_fmeta_buf) {
+      LOG_ERROR("malloc error");
+      res.retcode = ForwardInternalError;
+      goto out_pull_response;
+    }
+    memcpy(pull_fmeta_buf, &pull_fmeta, sizeof(ForwardFile));
+    ret = RecvSync(next_fd, pull_fmeta_buf->filename, pull_fmeta.length);
+    if (ret) {
+      LOG_ERROR("recv filename error");
+      free(pull_fmeta_buf);
+      res.retcode = ForwardInterrupt;
+      goto out_pull_response;
+    }
+    SendSync(fd, pull_fmeta_buf, fmeta_total_len);
+
+    uint32_t f_length = pull_res.length - sizeof(ForwardResponse) - fmeta_total_len;
+    ret = StoreAndForward(next_fd, fd, pull_fmeta_buf, f_length);
+    free(pull_fmeta_buf);
+    if (ret) {
+      LOG_ERROR("store and forward error");
+      res.retcode = ForwardInterrupt;
+      goto out_pull_response;
+    }
+  }
+
+  MakeResponse(&res, req, pull_res.retcode);
+  ret = SendSync(fd, &res, sizeof(res));
+  if (ret) {
+    LOG_ERROR("send response error");
+    ret = -1;
+  }
+  close(next_fd);
+  return ret;
+
+out_pull_response:
+  MakeResponse(&res, req, res.retcode);
+  ret = SendSync(fd, &res, sizeof(res));
+  if (ret) {
+    LOG_ERROR("send response error");
+    ret = -1;
+  }
+out_pull:
   if (next_fd > 0) {
     close(next_fd);
   }
@@ -135,6 +341,73 @@ out:
     close(w_fd);
   }
   return ret;
+}
+
+int PullFileToClient(int fd, ForwardRequest *req, ForwardFile *fmeta) {
+  ForwardResponse res;
+  int ret = 0;
+  int r_fd = open((const char *)fmeta->filename, O_RDONLY);
+  if (r_fd < 0) {
+    LOG_ERROR("open file error, %d", errno);
+    MakeResponse(&res, req, ForwardInternalError);
+    SendSync(fd, &res, sizeof(res));
+    return -1;
+  }
+
+  struct stat s;
+  if (fstat(r_fd, &s) < 0) {
+    LOG_ERROR("stat file error, %d", errno);
+    close(r_fd);
+    MakeResponse(&res, req, ForwardInternalError);
+    SendSync(fd, &res, sizeof(res));
+    return -1;
+  }
+
+  uint64_t f_size = s.st_size;
+  size_t fname_len = strlen((const char *)fmeta->filename);
+  uint32_t fmeta_length = sizeof(ForwardFile) + fname_len + 1;
+
+  ForwardResponse resp_res;
+  resp_res.length = sizeof(ForwardResponse) + fmeta_length + f_size;
+  resp_res.magic = kForwardMagic;
+  resp_res.version = kForwardVersion1;
+  resp_res.cmd = ForwardPush;
+  resp_res.ttl = 0;
+  resp_res.retcode = ForwardSuccess;
+  resp_res.id = req->id;
+
+  SendSync(fd, &resp_res, sizeof(resp_res));
+
+  ForwardFile *resp_fmeta =
+      (ForwardFile *)malloc(fmeta_length);
+  if (!resp_fmeta) {
+    LOG_ERROR("malloc error");
+    close(r_fd);
+    MakeResponse(&res, req, ForwardInternalError);
+    SendSync(fd, &res, sizeof(res));
+    return -1;
+  }
+
+  resp_fmeta->length = fname_len + 1;
+  memcpy(resp_fmeta->filename, fmeta->filename, fname_len);
+  resp_fmeta->filename[fname_len] = '\0';
+  SendSync(fd, resp_fmeta, fmeta_length);
+  free(resp_fmeta);
+
+  ret = ForwardSync(r_fd, fd, f_size);
+  close(r_fd);
+
+  if (ret) {
+    LOG_ERROR("forward file error");
+    MakeResponse(&res, req, ForwardInterrupt);
+    SendSync(fd, &res, sizeof(res));
+    return -1;
+  }
+
+  MakeResponse(&res, req, ForwardSuccess);
+  SendSync(fd, &res, sizeof(res));
+  LOG_INFO("pull file(%s) to client success", fmeta->filename);
+  return 0;
 }
 
 int ForwardLoop(int port) {
@@ -227,11 +500,19 @@ int ForwardLoop(int port) {
       LOG_ERROR("recv file name error");
       goto cleanup_fmeta;
     }
-    // Forward to next node
-    if (req.ttl > 0) {
-      ret = ForwardNext(fd, &req, fnodes, fmeta);
+// Handle request based on command
+    if (req.cmd == ForwardPull) {
+      if (req.ttl > 0) {
+        ret = PullForward(fd, &req, fnodes, fmeta);
+      } else {
+        ret = PullFileToClient(fd, &req, fmeta);
+      }
     } else {
-      ret = StoreLocal(fd, &req, fmeta);
+      if (req.ttl > 0) {
+        ret = ForwardNext(fd, &req, fnodes, fmeta);
+      } else {
+        ret = StoreLocal(fd, &req, fmeta);
+      }
     }
 
   cleanup_fmeta:
