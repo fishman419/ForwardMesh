@@ -21,7 +21,12 @@ jobs:
     - name: Build
       run: make
 
-    - name: Run tests
+    - name: Run integration tests
       run: |
         chmod +x tests/test_basic.sh
         ./tests/test_basic.sh
+
+    - name: Run AddressSanitizer tests
+      run: |
+        chmod +x tests/test_asan.sh
+        make asan-test

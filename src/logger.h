@@ -2,18 +2,13 @@
 #define LOGGER_H
 
 #include <stdio.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <time.h>
-#include <unistd.h>
 
 typedef enum { LOG_DEBUG, LOG_INFO, LOG_WARNING, LOG_ERROR } LogLevel;
 
-extern FILE* log_file;
-
 int LogInit(const char *filename);
 void LogClose();
-void LogWrite(LogLevel level, const char *format, ...);
+void LogWrite(LogLevel level, const char *format, ...)
+    __attribute__((format(printf, 2, 3)));
 
 #define LOG_DEBUG(...) LogWrite(LOG_DEBUG, __VA_ARGS__)
 #define LOG_INFO(...) LogWrite(LOG_INFO, __VA_ARGS__)

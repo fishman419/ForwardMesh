@@ -1,4 +1,9 @@
 bin/
 build/
+bin_asan/
+build_asan/
+bin_leaks/
+build_leaks/
 *.o
 *.log
+*.pid

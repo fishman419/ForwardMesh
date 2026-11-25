@@ -15,15 +15,19 @@ const uint32_t kDefaultPort = 40000;
 const uint32_t kForwardMagic = 0xFF44AADD;
 const uint8_t kForwardVersion1 = 1;
 const uint8_t kMaxForwardTTL = 32;
-const int kDefaultBacklog = 5;
+const int kDefaultBacklog = 128;
 const int kDefaultFileMode = 0644;
 const size_t kForwardBufSize = 16384;
+const uint32_t kMaxFilenameLen = 4096;
+const int kDefaultSocketTimeoutSec = 30;
 
 enum ForwardRetcode {
   ForwardSuccess = 0,
   ForwardInterrupt = 1,
   ForwardUnreachable = 2,
   ForwardInternalError = 3,
+  ForwardInvalidRequest = 4,
+  ForwardFileNotFound = 5,
   ForwardRetcodeMax,
 };
 

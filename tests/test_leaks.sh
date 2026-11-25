@@ -1,192 +1,72 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-LEAKS_BIN_DIR="${LEAKS_BIN:-$(dirname "$0")/../bin_leaks}"
+LEAKS_BIN_DIR="${LEAKS_BIN:-$PROJECT_DIR/bin_leaks}"
+
+WORK_ROOT="$(mktemp -d)"
+PIDS=()
+
+cleanup() {
+    for pid in "${PIDS[@]:-}"; do
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
+    done
+    rm -rf "$WORK_ROOT"
+}
+trap cleanup EXIT
 
 echo "=== ForwardMesh Memory Leak Tests (macOS leaks) ==="
 
-# Kill any existing fwdd processes to free ports
-pkill -f "./bin_leaks/fwdd" 2>/dev/null || true
-pkill -f "./bin/fwdd" 2>/dev/null || true
-sleep 1
+if ! command -v leaks > /dev/null 2>&1; then
+    echo "SKIP: macOS leaks(1) utility not found"
+    exit 0
+fi
 
-# Helper to run server and check leaks
-run_with_leaks_check() {
-    local test_name="$1"
-    local test_func="$2"
+N1="$WORK_ROOT/n1"
+N2="$WORK_ROOT/n2"
+mkdir -p "$N1" "$N2"
+printf "leak check payload\n" > "$WORK_ROOT/sample.txt"
 
-    echo "[$test_name] Running with leak detection..."
+"$LEAKS_BIN_DIR/fwdd" -F -d "$N2" -p 41302 -t 4 -P "$N2/fwdd.pid" &
+P2=$!
+PIDS+=("$P2")
+"$LEAKS_BIN_DIR/fwdd" -F -d "$N1" -p 41301 -t 4 -P "$N1/fwdd.pid" &
+P1=$!
+PIDS+=("$P1")
 
-    # Start server
-    TEST_DIR=$(mktemp -d)
-    SERVER_PID=$( "$LEAKS_BIN_DIR/fwdd" -d "$TEST_DIR" -p "$PORT" > /dev/null 2>&1 & echo $! )
-    sleep 1
+for _ in $(seq 1 50); do
+    [ -s "$N1/fwdd.pid" ] && [ -s "$N2/fwdd.pid" ] && break
+    sleep 0.05
+done
 
-    # Run test
-    eval "$test_func"
-    local test_result=$?
+echo "[Test 1] Exercising push, pull, and error paths..."
+"$LEAKS_BIN_DIR/fwd" -a 127.0.0.1:41301,127.0.0.1:41302 -f "$WORK_ROOT/sample.txt"
+"$LEAKS_BIN_DIR/fwd" -a 127.0.0.1:41301,127.0.0.1:41302 -g sample.txt -f "$WORK_ROOT/pulled.txt"
+cmp -s "$WORK_ROOT/sample.txt" "$WORK_ROOT/pulled.txt"
+"$LEAKS_BIN_DIR/fwd" -a 127.0.0.1:41301,127.0.0.1:41302 -g missing.txt -f "$WORK_ROOT/none.txt" > /dev/null 2>&1 || true
 
-    # Stop server and check for leaks
-    kill $SERVER_PID 2>/dev/null || true
-    sleep 1
-
-    # Check for leaks using leaks utility
-    LEAK_OUTPUT=$(leaks -q "$SERVER_PID" 2>&1 || true)
-    rm -rf "$TEST_DIR"
-
-    if echo "$LEAK_OUTPUT" | grep -q "leaks for"; then
-        echo "  FAIL: Memory leaks detected:"
-        echo "$LEAK_OUTPUT"
-        return 1
-    fi
-
-    if [ $test_result -ne 0 ]; then
-        echo "  FAIL: Test failed"
-        return 1
-    fi
-
-    echo "  PASS: No memory leaks detected"
-    return 0
-}
-
-PORT=40051
-
-# Test 1: Single-node push
-echo "[Test 1] Single-node push..."
-TEST_DIR=$(mktemp -d)
-"$LEAKS_BIN_DIR/fwdd" -d "$TEST_DIR" -p $PORT > /dev/null 2>&1 &
-SERVER_PID=$!
-sleep 1
-
-echo "test content" > "$TEST_DIR/testfile.txt"
-if "$LEAKS_BIN_DIR/fwd" -a 127.0.0.1:$PORT -f "$TEST_DIR/testfile.txt" > /dev/null 2>&1; then
-    if [ -f "$TEST_DIR/testfile.txt" ]; then
-        echo "  PASS: Single-node push works"
+echo "[Test 2] Inspecting live daemon processes with leaks(1)..."
+for pid in "$P1" "$P2"; do
+    set +e
+    LEAK_OUT="$(leaks -q "$pid" 2>&1)"
+    LEAK_RC=$?
+    set -e
+    if [ "$LEAK_RC" -eq 1 ]; then
+        echo "  FAIL: Memory leaks detected in PID $pid:"
+        echo "$LEAK_OUT"
+        exit 1
+    elif [ "$LEAK_RC" -ne 0 ]; then
+        echo "  WARN: leaks(1) could not attach to PID $pid (rc=$LEAK_RC): $LEAK_OUT"
     else
-        echo "  FAIL: File not stored"
+        echo "  PASS: No leaks in PID $pid"
     fi
-else
-    echo "  FAIL: Client failed"
-fi
+done
 
-# Check leaks
-sleep 1
-LEAKS_OUTPUT=$(leaks -q $SERVER_PID 2>&1 || true)
-kill $SERVER_PID 2>/dev/null || true
-rm -rf "$TEST_DIR"
-
-if echo "$LEAKS_OUTPUT" | grep -q "leaks for"; then
-    echo "  LEAK: $LEAKS_OUTPUT"
-fi
-
-PORT=40052
-
-# Test 2: Single-node pull
-echo "[Test 2] Single-node pull..."
-TEST_DIR=$(mktemp -d)
-"$LEAKS_BIN_DIR/fwdd" -d "$TEST_DIR" -p $PORT > /dev/null 2>&1 &
-SERVER_PID=$!
-sleep 1
-
-echo "pull content" > "$TEST_DIR/remote_file.txt"
-if "$LEAKS_BIN_DIR/fwd" -a 127.0.0.1:$PORT -g remote_file.txt -f /tmp/pull_output.txt > /dev/null 2>&1; then
-    if [ -f /tmp/pull_output.txt ] && grep -q "pull content" /tmp/pull_output.txt; then
-        echo "  PASS: Single-node pull works"
-    else
-        echo "  FAIL: File not retrieved correctly"
-    fi
-else
-    echo "  FAIL: Client failed"
-fi
-
-sleep 1
-LEAKS_OUTPUT=$(leaks -q $SERVER_PID 2>&1 || true)
-kill $SERVER_PID 2>/dev/null || true
-rm -rf "$TEST_DIR"
-rm -f /tmp/pull_output.txt
-
-if echo "$LEAKS_OUTPUT" | grep -q "leaks for"; then
-    echo "  LEAK: $LEAKS_OUTPUT"
-fi
-
-PORT=40053
-
-# Test 3: Two-node push chain
-echo "[Test 3] Two-node push chain..."
-TEST_DIR1=$(mktemp -d)
-TEST_DIR2=$(mktemp -d)
-"$LEAKS_BIN_DIR/fwdd" -d "$TEST_DIR2" -p 40061 > /dev/null 2>&1 &
-SERVER2_PID=$!
-"$LEAKS_BIN_DIR/fwdd" -d "$TEST_DIR1" -p $PORT > /dev/null 2>&1 &
-SERVER1_PID=$!
-sleep 1
-
-echo "chain push test" > /tmp/chain_push.txt
-if "$LEAKS_BIN_DIR/fwd" -a 127.0.0.1:$PORT,127.0.0.1:40061 -f /tmp/chain_push.txt > /dev/null 2>&1; then
-    if [ -f "$TEST_DIR2/chain_push.txt" ]; then
-        echo "  PASS: Two-node push works"
-    else
-        echo "  FAIL: File not forwarded to second node"
-    fi
-else
-    echo "  FAIL: Client failed"
-fi
-
-sleep 1
-LEAKS_OUTPUT1=$(leaks -q $SERVER1_PID 2>&1 || true)
-LEAKS_OUTPUT2=$(leaks -q $SERVER2_PID 2>&1 || true)
-kill $SERVER1_PID $SERVER2_PID 2>/dev/null || true
-rm -rf "$TEST_DIR1" "$TEST_DIR2"
-rm -f /tmp/chain_push.txt
-
-if echo "$LEAKS_OUTPUT1" | grep -q "leaks for"; then
-    echo "  LEAK (server1): $LEAKS_OUTPUT1"
-fi
-if echo "$LEAKS_OUTPUT2" | grep -q "leaks for"; then
-    echo "  LEAK (server2): $LEAKS_OUTPUT2"
-fi
-
-PORT=40054
-
-# Test 4: Two-node pull chain
-echo "[Test 4] Two-node pull chain..."
-TEST_DIR1=$(mktemp -d)
-TEST_DIR2=$(mktemp -d)
-"$LEAKS_BIN_DIR/fwdd" -d "$TEST_DIR2" -p 40071 > /dev/null 2>&1 &
-SERVER2_PID=$!
-"$LEAKS_BIN_DIR/fwdd" -d "$TEST_DIR1" -p $PORT > /dev/null 2>&1 &
-SERVER1_PID=$!
-sleep 1
-
-echo "chain pull test" > "$TEST_DIR2/chain_pull_src.txt"
-if "$LEAKS_BIN_DIR/fwd" -a 127.0.0.1:$PORT,127.0.0.1:40071 -g chain_pull_src.txt -f /tmp/chain_pull_dst.txt > /dev/null 2>&1; then
-    if [ -f /tmp/chain_pull_dst.txt ] && grep -q "chain pull test" /tmp/chain_pull_dst.txt; then
-        echo "  PASS: Two-node pull works"
-    else
-        echo "  FAIL: File not retrieved correctly"
-    fi
-else
-    echo "  FAIL: Client failed"
-fi
-
-sleep 1
-LEAKS_OUTPUT1=$(leaks -q $SERVER1_PID 2>&1 || true)
-LEAKS_OUTPUT2=$(leaks -q $SERVER2_PID 2>&1 || true)
-kill $SERVER1_PID $SERVER2_PID 2>/dev/null || true
-rm -rf "$TEST_DIR1" "$TEST_DIR2"
-rm -f /tmp/chain_pull_dst.txt
-
-if echo "$LEAKS_OUTPUT1" | grep -q "leaks for"; then
-    echo "  LEAK (server1): $LEAKS_OUTPUT1"
-fi
-if echo "$LEAKS_OUTPUT2" | grep -q "leaks for"; then
-    echo "  LEAK (server2): $LEAKS_OUTPUT2"
-fi
-
-# Cleanup
-pkill -f "./bin_leaks/fwdd" 2>/dev/null || true
-
+kill "$P1" "$P2"
+wait "$P1" "$P2"
 echo ""
 echo "=== Leak tests completed ==="

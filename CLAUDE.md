@@ -8,34 +8,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Standard build (outputs to bin/fwdd, bin/fwd)
 make
 
-# Optimized build with aggressive compiler flags
-make -f Makefile.optimized
-
-# Debug build
-make -f Makefile.optimized debug
-
-# Clean build artifacts
+# Clean build artifacts (including ASAN and leaks build dirs)
 make clean
 ```
 
 ## Testing
 
 ```bash
-# Run all tests
-./tests/test_basic.sh
+# Run integration tests
+make test
 
-# Run memory leak tests (macOS)
-make leaks-check
-
-# Run ASAN tests (Linux only - macOS has ASAN + fork + threads issues)
+# Run AddressSanitizer tests (uses -F foreground mode; works on Linux & macOS)
 make asan-test
+
+# Run memory leak tests (macOS leaks(1))
+make leaks-check
 ```
 
 ## Protocol Stack
 
 The protocol uses a packet format: `ForwardHead + ForwardNode[n] + ForwardFile + data`
 
-When forwarding through a node, the TTL decrements and one ForwardNode is consumed:
+When forwarding through a node, the TTL decrements and one `ForwardNode` is consumed:
 - Initial: `ForwardHead + ForwardNode*n + ForwardFile + data`
 - After hop: `ForwardHead + ForwardNode*(n-1) + ForwardFile + data`
 - Final: `ForwardHead + ForwardFile + data`
@@ -44,49 +38,27 @@ Key constants in `src/protocol.h`:
 - Magic: `0xFF44AADD`, Version: `1`
 - Default port: `40000`
 - Max TTL: `32`
+- Max filename length: `4096`
 - Buffer size: `16384`
+- Socket timeout: `30s`
 
-Commands: `ForwardPull` (cmd=0) requests file from final destination, `ForwardPush` (cmd=1) sends file through chain.
+Commands: `ForwardPull` (`cmd=0`) requests file from final destination, `ForwardPush` (`cmd=1`) sends file through chain.
 
 ## Architecture
 
-**fwdd** (server daemon):
-- Double-fork daemonize with SIGCHLD/SIGHUP ignored
-- Thread pool model: `ForwardLoop(port, num_threads)` creates worker threads that process requests asynchronously
-- Main thread handles `accept()` and dispatches connections to thread pool via mutex-protected queue
-- Worker threads (`WorkerThread()`) pull tasks from queue and process concurrently
-- `ForwardNext()` - store-and-forward to next node (uses temp file for buffering)
-- `StoreLocal()` - write file to disk when TTL reaches 0
-- `PullForward()` / `PullFileToClient()` - pull mode handlers
+**fwdd** (`src/fwdd.cc`):
+- Supports both double-fork daemon mode (default) and foreground mode (`-F`), plus PID file management (`-P pidfile`) and graceful `SIGINT`/`SIGTERM` shutdown.
+- `CreateListenSocket()` binds before `fork()` so startup port conflicts fail immediately with non-zero exit status.
+- Thread pool model: `ForwardLoop(sockfd, num_threads)` polls the listen socket and dispatches accepted fds to worker threads (`WorkerThread` -> `HandleConnection`).
+- Validates protocol header (`magic`, `version`, `cmd`, `ttl`, packet & filename bounds) and confines paths inside `-d dir` (`IsSafeRelativePath` / `ExtractBasename`).
+- `StoreAndForward()` / `StoreLocal()` write into temporary files and atomically `rename()` onto target filenames.
+- `ForwardNext()` / `PullForward()` / `PullFileToClient()` handle push and pull chains and propagate `ForwardRetcode` end-to-end.
 
-**fwd** (client):
-- `SendFile()` - push mode: sends file through forwarding chain
-- `PullFile()` - pull mode: request file from final node and receive it back
-- `ResolveAddress()` - parses comma-separated ip:port chain
+**fwd** (`src/fwd.cc`):
+- `SendFile()` - push mode: sends file through forwarding chain and checks `ForwardResponse::retcode`.
+- `PullFile()` - pull mode: requests relative file path from final node and writes local output cleanly.
+- `ResolveAddress()` - validates IPv4 (`inet_pton == 1`), port (`1..65535`), and hop limit (`<= kMaxForwardTTL`).
 
-**util.cc** - Sync I/O: `SendSync()`, `RecvSync()`, `ForwardSync()` (relay data between fds), `MakeResponse()`
-
-## Usage Examples
-
-**Server:**
-```bash
-./bin/fwdd [-p port] [-d dir] [-t threads]
-```
-
-**Client push (send file through chain):**
-```bash
-# Single node
-./bin/fwd -a 127.0.0.1:40000 -f test.txt
-
-# Multi-node chain
-./bin/fwd -a 127.0.0.1:40000,127.0.0.1:40001,127.0.0.1:40002 -f test.txt
-```
-
-**Client pull (get file from final node):**
-```bash
-# Single node
-./bin/fwd -a 127.0.0.1:40000 -g /path/to/remote.txt -f local.txt
-
-# Multi-node chain
-./bin/fwd -a 127.0.0.1:40000,127.0.0.1:40001,127.0.0.1:40002 -g /path/file.txt -f local.txt
-```
+**util.cc / logger.cc**:
+- `SendSync()`, `RecvSync()`, `ForwardSync()` handle `EINTR`, premature EOF (`read == 0`), and short writes.
+- `logger.cc` serializes log writes with `std::mutex` and `localtime_r()`.

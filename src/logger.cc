@@ -4,42 +4,52 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
-FILE *log_file = NULL;
+#include <mutex>
+
+namespace {
+FILE *g_log_file = NULL;
+std::mutex g_log_mutex;
+}  // namespace
 
 int LogInit(const char *filename) {
-  if (log_file) {
-    fclose(log_file);
+  std::lock_guard<std::mutex> lock(g_log_mutex);
+  if (g_log_file) {
+    fclose(g_log_file);
+    g_log_file = NULL;
   }
 
-  log_file = fopen(filename, "a");
-  if (!log_file) {
+  g_log_file = fopen(filename, "a");
+  if (!g_log_file) {
     perror("Failed to open log file");
-    return errno;
+    return errno ? errno : -1;
   }
 
-  setvbuf(log_file, NULL, _IOLBF, 0);
+  setvbuf(g_log_file, NULL, _IOLBF, 0);
   return 0;
 }
 
 void LogClose() {
-  if (log_file) {
-    fclose(log_file);
-    log_file = NULL;
+  std::lock_guard<std::mutex> lock(g_log_mutex);
+  if (g_log_file) {
+    fclose(g_log_file);
+    g_log_file = NULL;
   }
 }
 
 void LogWrite(LogLevel level, const char *format, ...) {
-  if (!log_file) return;
+  std::lock_guard<std::mutex> lock(g_log_mutex);
+  if (!g_log_file) return;
 
-  time_t now;
-  time(&now);
-  struct tm* tm_info = localtime(&now);
+  time_t now = time(NULL);
+  struct tm tm_info;
+  localtime_r(&now, &tm_info);
 
   char time_str[20];
-  strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", tm_info);
+  strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", &tm_info);
 
-  const char* level_str;
+  const char *level_str;
   switch (level) {
     case LOG_DEBUG:
       level_str = "DEBUG";
@@ -58,12 +68,13 @@ void LogWrite(LogLevel level, const char *format, ...) {
       break;
   }
 
-  fprintf(log_file, "[%s] [%s] ", time_str, level_str);
+  fprintf(g_log_file, "[%s] [%s] ", time_str, level_str);
 
   va_list args;
   va_start(args, format);
-  vfprintf(log_file, format, args);
+  vfprintf(g_log_file, format, args);
   va_end(args);
 
-  fprintf(log_file, "\n");
+  fprintf(g_log_file, "\n");
+  fflush(g_log_file);
 }
