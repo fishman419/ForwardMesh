@@ -37,9 +37,10 @@ trap cleanup EXIT
 start_node() {
     local dir="$1"
     local port="$2"
+    shift 2
     local pidfile="$dir/fwdd.pid"
     mkdir -p "$dir"
-    "$BIN_DIR/fwdd" -F -d "$dir" -p "$port" -t 4 -P "$pidfile" &
+    "$BIN_DIR/fwdd" -F -d "$dir" -p "$port" -t 4 -P "$pidfile" "$@" &
     NODE_STARTED_PID=$!
     PIDS+=("$NODE_STARTED_PID")
     for _ in $(seq 1 50); do
@@ -63,7 +64,7 @@ stop_node() {
     done
 }
 
-echo "=== ForwardMesh Integration Tests ==="
+echo "=== ForwardMesh Integration Tests (Protocol V2) ==="
 
 # Test 1: Build
 echo "[Test 1] Building..."
@@ -91,21 +92,26 @@ if "$BIN_DIR/fwdd" -p 70000 > /dev/null 2>&1; then
 fi
 echo "  PASS: CLI help and validation work"
 
-# Test 3: Single-node Push & Overwrite Truncation Check
-echo "[Test 3] Single-node push & overwrite truncation..."
+# Test 3: Single-node Push (overwrite truncation + 0-byte empty file)
+echo "[Test 3] Single-node push, overwrite truncation & empty file..."
 NODE_DIR="$WORK_ROOT/t3_node"
 SRC_DIR="$WORK_ROOT/t3_src"
 mkdir -p "$NODE_DIR" "$SRC_DIR"
 printf "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_OLD_TRAILING_DATA\n" > "$NODE_DIR/push_test.txt"
 printf "short new content\n" > "$SRC_DIR/push_test.txt"
+: > "$SRC_DIR/empty.txt"
 
 start_node "$NODE_DIR" $((BASE_PORT + 1))
 NODE_PID="$NODE_STARTED_PID"
 
 "$BIN_DIR/fwd" -a 127.0.0.1:$((BASE_PORT + 1)) -f "$SRC_DIR/push_test.txt"
 cmp -s "$SRC_DIR/push_test.txt" "$NODE_DIR/push_test.txt"
+
+"$BIN_DIR/fwd" -a 127.0.0.1:$((BASE_PORT + 1)) -f "$SRC_DIR/empty.txt"
+cmp -s "$SRC_DIR/empty.txt" "$NODE_DIR/empty.txt"
+
 stop_node "$NODE_PID"
-echo "  PASS: Single-node push & clean overwrite work"
+echo "  PASS: Single-node push, overwrite & empty file work"
 
 # Test 4: Single-node Pull (including relative subdirectory)
 echo "[Test 4] Single-node pull..."
@@ -122,44 +128,62 @@ cmp -s "$NODE_DIR/subdir/remote_file.txt" "$OUT_DIR/pulled.txt"
 stop_node "$NODE_PID"
 echo "  PASS: Single-node pull works"
 
-# Test 5: Three-node Push Chain with Multi-Chunk Binary Payload (128 KB)
-echo "[Test 5] Three-node push chain (128 KB binary)..."
+# Test 5: Three-node Cut-Through Streaming (zero disk writes on intermediate hops)
+echo "[Test 5] Three-node cut-through streaming push & pull (256 KB)..."
 N1="$WORK_ROOT/t5_n1"
 N2="$WORK_ROOT/t5_n2"
 N3="$WORK_ROOT/t5_n3"
-SRC_BIN="$WORK_ROOT/t5_payload.bin"
-dd if=/dev/urandom of="$SRC_BIN" bs=1024 count=128 2>/dev/null
+SRC_BIN="$WORK_ROOT/t5_stream.bin"
+PULLED_BIN="$WORK_ROOT/t5_pulled.bin"
+dd if=/dev/urandom of="$SRC_BIN" bs=1024 count=256 2>/dev/null
 
 start_node "$N3" $((BASE_PORT + 13)); P3="$NODE_STARTED_PID"
 start_node "$N2" $((BASE_PORT + 12)); P2="$NODE_STARTED_PID"
 start_node "$N1" $((BASE_PORT + 11)); P1="$NODE_STARTED_PID"
 
 "$BIN_DIR/fwd" -a 127.0.0.1:$((BASE_PORT + 11)),127.0.0.1:$((BASE_PORT + 12)),127.0.0.1:$((BASE_PORT + 13)) -f "$SRC_BIN"
-cmp -s "$SRC_BIN" "$N1/t5_payload.bin"
-cmp -s "$SRC_BIN" "$N2/t5_payload.bin"
-cmp -s "$SRC_BIN" "$N3/t5_payload.bin"
-stop_node "$P1" "$P2" "$P3"
-echo "  PASS: Three-node binary push chain works"
+cmp -s "$SRC_BIN" "$N3/t5_stream.bin"
+if [ -e "$N1/t5_stream.bin" ] || [ -e "$N2/t5_stream.bin" ]; then
+    echo "  FAIL: Intermediate hop wrote file during cut-through streaming"
+    exit 1
+fi
 
-# Test 6: Three-node Pull Chain with Multi-Chunk Binary Payload (128 KB)
-echo "[Test 6] Three-node pull chain (128 KB binary)..."
+"$BIN_DIR/fwd" -a 127.0.0.1:$((BASE_PORT + 11)),127.0.0.1:$((BASE_PORT + 12)),127.0.0.1:$((BASE_PORT + 13)) -g t5_stream.bin -f "$PULLED_BIN"
+cmp -s "$SRC_BIN" "$PULLED_BIN"
+if [ -e "$N1/t5_stream.bin" ] || [ -e "$N2/t5_stream.bin" ]; then
+    echo "  FAIL: Intermediate hop wrote file during cut-through pull"
+    exit 1
+fi
+
+stop_node "$P1" "$P2" "$P3"
+echo "  PASS: Cut-through zero-disk streaming push & pull work"
+
+# Test 6: Three-node Single-Pass Tee Store-and-Forward (-s flag)
+echo "[Test 6] Three-node tee caching push & pull (-s flag, 256 KB)..."
 N1="$WORK_ROOT/t6_n1"
 N2="$WORK_ROOT/t6_n2"
 N3="$WORK_ROOT/t6_n3"
 mkdir -p "$N1" "$N2" "$N3"
-dd if=/dev/urandom of="$N3/remote_blob.bin" bs=1024 count=128 2>/dev/null
-PULLED_BIN="$WORK_ROOT/t6_pulled.bin"
+SRC_CACHE="$WORK_ROOT/t6_cached.bin"
+dd if=/dev/urandom of="$SRC_CACHE" bs=1024 count=256 2>/dev/null
+dd if=/dev/urandom of="$N3/remote_cached.bin" bs=1024 count=256 2>/dev/null
 
 start_node "$N3" $((BASE_PORT + 23)); P3="$NODE_STARTED_PID"
 start_node "$N2" $((BASE_PORT + 22)); P2="$NODE_STARTED_PID"
 start_node "$N1" $((BASE_PORT + 21)); P1="$NODE_STARTED_PID"
 
-"$BIN_DIR/fwd" -a 127.0.0.1:$((BASE_PORT + 21)),127.0.0.1:$((BASE_PORT + 22)),127.0.0.1:$((BASE_PORT + 23)) -g remote_blob.bin -f "$PULLED_BIN"
-cmp -s "$N3/remote_blob.bin" "$PULLED_BIN"
-cmp -s "$N3/remote_blob.bin" "$N1/remote_blob.bin"
-cmp -s "$N3/remote_blob.bin" "$N2/remote_blob.bin"
+"$BIN_DIR/fwd" -s -a 127.0.0.1:$((BASE_PORT + 21)),127.0.0.1:$((BASE_PORT + 22)),127.0.0.1:$((BASE_PORT + 23)) -f "$SRC_CACHE"
+cmp -s "$SRC_CACHE" "$N1/t6_cached.bin"
+cmp -s "$SRC_CACHE" "$N2/t6_cached.bin"
+cmp -s "$SRC_CACHE" "$N3/t6_cached.bin"
+
+"$BIN_DIR/fwd" -s -a 127.0.0.1:$((BASE_PORT + 21)),127.0.0.1:$((BASE_PORT + 22)),127.0.0.1:$((BASE_PORT + 23)) -g remote_cached.bin -f "$WORK_ROOT/t6_pulled.bin"
+cmp -s "$N3/remote_cached.bin" "$WORK_ROOT/t6_pulled.bin"
+cmp -s "$N3/remote_cached.bin" "$N1/remote_cached.bin"
+cmp -s "$N3/remote_cached.bin" "$N2/remote_cached.bin"
+
 stop_node "$P1" "$P2" "$P3"
-echo "  PASS: Three-node binary pull chain works"
+echo "  PASS: Single-pass tee caching (-s) works for push & pull"
 
 # Test 7: Concurrent Multi-Client Push & Pull
 echo "[Test 7] Concurrent requests across 2-node chain..."
@@ -192,8 +216,8 @@ done
 stop_node "$P1" "$P2"
 echo "  PASS: Concurrent push & pull succeeded"
 
-# Test 8: Error Handling & Path Traversal Protection
-echo "[Test 8] Error propagation & path traversal protection..."
+# Test 8: Error Handling, Path Traversal & CRC32 Corruption Rejection
+echo "[Test 8] Error propagation, path traversal & CRC32 corruption rejection..."
 N1="$WORK_ROOT/t8_n1"
 mkdir -p "$N1"
 printf "secret outside\n" > "$WORK_ROOT/outside_secret.txt"
@@ -216,10 +240,36 @@ if "$BIN_DIR/fwd" -a 127.0.0.1:$((BASE_PORT + 41)) -g ../outside_secret.txt -f "
     exit 1
 fi
 
+# Inject tampered payload with bad CRC32 over raw TCP and assert retcode == 6 (ForwardChecksumMismatch)
+if command -v python3 > /dev/null 2>&1; then
+    python3 - "$((BASE_PORT + 41))" << 'PYEOF'
+import socket, struct, sys
+
+port = int(sys.argv[1])
+fname = b"corrupted.txt\x00"
+payload = b"tampered payload bytes"
+# ForwardRequest: uint64 length, uint32 magic, uint8 ver, cmd, ttl, flags, uint64 id, uint32 bad_crc32
+total_len = 28 + 4 + len(fname) + len(payload)
+hdr = struct.pack("!QIBBBBQI", total_len, 0xFF44AADD, 2, 1, 0, 0, 0x1234, 0xDEADBEEF)
+fmeta = struct.pack("!I", len(fname)) + fname
+
+with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+    s.sendall(hdr + fmeta + payload)
+    resp = s.recv(28)
+    assert len(resp) == 28, f"short resp {len(resp)}"
+    r_len, r_magic, r_ver, r_cmd, r_ttl, r_retcode, r_id, r_crc = struct.unpack("!QIBBBBQI", resp)
+    assert r_magic == 0xFF44AADD and r_retcode == 6, f"expected ForwardChecksumMismatch(6), got {r_retcode}"
+PYEOF
+    if [ -e "$N1/corrupted.txt" ]; then
+        echo "  FAIL: Corrupted payload should never be saved to disk"
+        exit 1
+    fi
+fi
+
 "$BIN_DIR/fwd" -a 127.0.0.1:$((BASE_PORT + 41)) -f "$WORK_ROOT/t8_hello.txt"
 cmp -s "$WORK_ROOT/t8_hello.txt" "$N1/t8_hello.txt"
 stop_node "$P1"
-echo "  PASS: Error handling and security checks work"
+echo "  PASS: Error handling, path sandbox, and CRC32 rejection work"
 
 # Test 9: Daemon Mode + PID File + Graceful SIGTERM
 echo "[Test 9] Daemon mode & PID file lifecycle..."

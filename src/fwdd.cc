@@ -29,6 +29,7 @@ std::queue<int> g_task_queue;
 std::mutex g_queue_mutex;
 std::condition_variable g_queue_cv;
 bool g_shutdown = false;
+bool g_always_store_on_hop = false;
 volatile sig_atomic_t g_stop_requested = 0;
 
 void SignalHandler(int /*signo*/) { g_stop_requested = 1; }
@@ -56,55 +57,72 @@ int ConnectNextNode(const ForwardNode &node) {
   return next_fd;
 }
 
-// Receives data_len bytes from src_fd into a temporary file in the working
-// directory, forwards the same bytes to dst_fd, and atomically renames the
-// temporary file onto the local basename.
-int StoreAndForward(int src_fd, int dst_fd, const ForwardFile *fmeta,
-                    uint32_t data_len) {
-  std::string local_name =
-      ExtractBasename(reinterpret_cast<const char *>(fmeta->filename));
-  if (local_name.empty()) {
-    LOG_ERROR("invalid filename for local store");
-    return -1;
+// Relays data_len bytes from src_fd to dst_fd in cut-through streaming fashion.
+// When store_copy is true, tees the stream into a temporary file in a single
+// pass and atomically renames it onto the local basename only if CRC32 matches.
+int StreamOrTeeForward(int src_fd, int dst_fd, const ForwardFile *fmeta,
+                       uint64_t data_len, uint32_t expected_crc32,
+                       bool store_copy, uint8_t *out_err) {
+  *out_err = ForwardSuccess;
+  int tmp_fd = -1;
+  char tmp_path[] = ".fwd_tee_XXXXXX";
+  std::string local_name;
+
+  if (store_copy) {
+    local_name =
+        ExtractBasename(reinterpret_cast<const char *>(fmeta->filename));
+    if (local_name.empty()) {
+      LOG_ERROR("invalid filename for intermediate hop cache");
+      *out_err = ForwardInvalidRequest;
+      return -1;
+    }
+    tmp_fd = mkstemp(tmp_path);
+    if (tmp_fd < 0) {
+      LOG_ERROR("mkstemp error, %d", errno);
+      *out_err = ForwardInternalError;
+      return -1;
+    }
+    fchmod(tmp_fd, kDefaultFileMode);
   }
 
-  char tmp_path[] = ".fwd_forward_XXXXXX";
-  int tmp_fd = mkstemp(tmp_path);
-  if (tmp_fd < 0) {
-    LOG_ERROR("mkstemp error, %d", errno);
-    return -1;
-  }
-  fchmod(tmp_fd, kDefaultFileMode);
-
-  if (ForwardSync(src_fd, tmp_fd, data_len) != 0) {
-    LOG_ERROR("receive to temp error");
+  uint32_t actual_crc32 = 0;
+  int relay_rc = RelayStream(src_fd, dst_fd, tmp_fd, data_len, &actual_crc32);
+  if (tmp_fd >= 0) {
     close(tmp_fd);
-    unlink(tmp_path);
+  }
+
+  if (relay_rc != 0) {
+    if (store_copy) {
+      unlink(tmp_path);
+    }
+    *out_err = ForwardInterrupt;
     return -1;
   }
 
-  if (lseek(tmp_fd, 0, SEEK_SET) < 0) {
-    LOG_ERROR("lseek temp error, %d", errno);
-    close(tmp_fd);
-    unlink(tmp_path);
+  if (actual_crc32 != expected_crc32) {
+    LOG_ERROR("hop crc32 mismatch: expected 0x%08x, actual 0x%08x",
+              expected_crc32, actual_crc32);
+    if (store_copy) {
+      unlink(tmp_path);
+    }
+    *out_err = ForwardChecksumMismatch;
     return -1;
   }
 
-  if (ForwardSync(tmp_fd, dst_fd, data_len) != 0) {
-    LOG_ERROR("forward from temp error");
-    close(tmp_fd);
-    unlink(tmp_path);
-    return -1;
+  if (store_copy) {
+    if (rename(tmp_path, local_name.c_str()) != 0) {
+      LOG_ERROR("rename temp to %s error, %d", local_name.c_str(), errno);
+      unlink(tmp_path);
+      *out_err = ForwardInternalError;
+      return -1;
+    }
+    LOG_INFO("tee-cached and streamed %llu bytes (%s, crc32=0x%08x)",
+             static_cast<unsigned long long>(data_len), local_name.c_str(),
+             actual_crc32);
+  } else {
+    LOG_INFO("cut-through streamed %llu bytes (crc32=0x%08x)",
+             static_cast<unsigned long long>(data_len), actual_crc32);
   }
-
-  close(tmp_fd);
-  if (rename(tmp_path, local_name.c_str()) != 0) {
-    LOG_ERROR("rename temp to %s error, %d", local_name.c_str(), errno);
-    unlink(tmp_path);
-    return -1;
-  }
-
-  LOG_INFO("stored and forwarded %u bytes (%s)", data_len, local_name.c_str());
   return 0;
 }
 
@@ -119,13 +137,14 @@ int ForwardNext(int fd, const ForwardRequest *req, const ForwardNode *nodes,
       static_cast<uint64_t>(req->ttl) * sizeof(ForwardNode) +
       sizeof(ForwardFile) + fmeta->length;
   if (req->length < header_overhead) {
-    LOG_ERROR("invalid push packet length %u < %llu", req->length,
+    LOG_ERROR("invalid push packet length %llu < %llu",
+              static_cast<unsigned long long>(req->length),
               static_cast<unsigned long long>(header_overhead));
     MakeResponse(&res, req, ForwardInvalidRequest);
-    SendSync(fd, &res, sizeof(res));
+    SendResponseHeader(fd, res);
     return -1;
   }
-  uint32_t data_len = static_cast<uint32_t>(req->length - header_overhead);
+  uint64_t data_len = req->length - header_overhead;
 
   int next_fd = ConnectNextNode(nodes[0]);
   if (next_fd < 0) {
@@ -134,53 +153,55 @@ int ForwardNext(int fd, const ForwardRequest *req, const ForwardNode *nodes,
     goto out_response;
   }
 
-  ForwardRequest next_req;
-  memcpy(&next_req, req, sizeof(next_req));
-  next_req.length -= sizeof(ForwardNode);
-  next_req.ttl -= 1;
+  {
+    ForwardRequest next_req = *req;
+    next_req.length -= sizeof(ForwardNode);
+    next_req.ttl -= 1;
 
-  if (SendSync(next_fd, &next_req, sizeof(ForwardRequest)) != 0) {
-    LOG_ERROR("send forward req error");
-    retcode = ForwardInterrupt;
-    ret = -1;
-    goto out_response;
-  }
-  if (next_req.ttl > 0) {
-    if (SendSync(next_fd, nodes + 1, sizeof(ForwardNode) * next_req.ttl) != 0) {
-      LOG_ERROR("send forward nodes error");
+    if (SendRequestHeader(next_fd, next_req) != 0 ||
+        SendNodes(next_fd, nodes + 1, next_req.ttl) != 0 ||
+        SendFileMeta(next_fd, reinterpret_cast<const char *>(fmeta->filename),
+                     fmeta->length) != 0) {
+      LOG_ERROR("send push header/meta to next hop error");
       retcode = ForwardInterrupt;
       ret = -1;
       goto out_response;
     }
   }
-  if (SendSync(next_fd, fmeta, sizeof(ForwardFile) + fmeta->length) != 0) {
-    LOG_ERROR("send forward file error");
-    retcode = ForwardInterrupt;
-    ret = -1;
-    goto out_response;
-  }
 
-  if (StoreAndForward(fd, next_fd, fmeta, data_len) != 0) {
-    LOG_ERROR("store and forward error");
-    retcode = ForwardInterrupt;
-    ret = -1;
-    goto out_response;
-  }
+  {
+    bool store_copy =
+        ((req->flags & kFlagStoreOnHop) != 0) || g_always_store_on_hop;
+    uint8_t stream_err = ForwardSuccess;
+    int sret = StreamOrTeeForward(fd, next_fd, fmeta, data_len, req->crc32,
+                                  store_copy, &stream_err);
 
-  if (RecvSync(next_fd, &res, sizeof(res)) != 0) {
-    LOG_ERROR("recv response error");
-    retcode = ForwardInterrupt;
-    ret = -1;
-  } else {
-    retcode = res.retcode;
-    if (retcode != ForwardSuccess) {
+    // If relay completed on the wire (even with CRC mismatch), read downstream
+    // response; if wire relay broke mid-stream, bail immediately.
+    if (sret != 0 && stream_err == ForwardInterrupt) {
+      retcode = ForwardInterrupt;
       ret = -1;
+      goto out_response;
+    }
+
+    if (RecvResponseHeader(next_fd, &res) != 0) {
+      LOG_ERROR("recv downstream push response error");
+      retcode = (stream_err != ForwardSuccess) ? stream_err : ForwardInterrupt;
+      ret = -1;
+    } else if (res.magic != kForwardMagic || res.version != kForwardVersion) {
+      retcode = ForwardInternalError;
+      ret = -1;
+    } else {
+      retcode = (res.retcode != ForwardSuccess) ? res.retcode : stream_err;
+      if (retcode != ForwardSuccess) {
+        ret = -1;
+      }
     }
   }
 
 out_response:
   MakeResponse(&res, req, retcode);
-  if (SendSync(fd, &res, sizeof(res)) != 0) {
+  if (SendResponseHeader(fd, res) != 0) {
     LOG_ERROR("send response error");
     ret = -1;
   }
@@ -197,119 +218,106 @@ int PullForward(int fd, const ForwardRequest *req, const ForwardNode *nodes,
   if (next_fd < 0) {
     uint8_t err = (next_fd == -2) ? ForwardUnreachable : ForwardInternalError;
     MakeResponse(&res, req, err);
-    SendSync(fd, &res, sizeof(res));
+    SendResponseHeader(fd, res);
     return -1;
   }
 
-  ForwardRequest next_req;
-  memcpy(&next_req, req, sizeof(next_req));
+  ForwardRequest next_req = *req;
   next_req.length -= sizeof(ForwardNode);
   next_req.ttl -= 1;
 
-  if (SendSync(next_fd, &next_req, sizeof(next_req)) != 0 ||
-      (next_req.ttl > 0 &&
-       SendSync(next_fd, nodes + 1, sizeof(ForwardNode) * next_req.ttl) != 0) ||
-      SendSync(next_fd, fmeta, sizeof(ForwardFile) + fmeta->length) != 0) {
+  if (SendRequestHeader(next_fd, next_req) != 0 ||
+      SendNodes(next_fd, nodes + 1, next_req.ttl) != 0 ||
+      SendFileMeta(next_fd, reinterpret_cast<const char *>(fmeta->filename),
+                   fmeta->length) != 0) {
     LOG_ERROR("send pull request to next node failed");
     MakeResponse(&res, req, ForwardInterrupt);
-    SendSync(fd, &res, sizeof(res));
+    SendResponseHeader(fd, res);
     close(next_fd);
     return -1;
   }
 
   ForwardResponse pull_res;
-  if (RecvSync(next_fd, &pull_res, sizeof(pull_res)) != 0) {
+  if (RecvResponseHeader(next_fd, &pull_res) != 0) {
     LOG_ERROR("recv pull response error");
     MakeResponse(&res, req, ForwardInterrupt);
-    SendSync(fd, &res, sizeof(res));
+    SendResponseHeader(fd, res);
     close(next_fd);
     return -1;
   }
 
-  if (pull_res.magic != kForwardMagic || pull_res.retcode != ForwardSuccess ||
-      pull_res.cmd != ForwardPush) {
+  if (pull_res.magic != kForwardMagic || pull_res.version != kForwardVersion ||
+      pull_res.retcode != ForwardSuccess || pull_res.cmd != ForwardPush) {
     uint8_t err =
         (pull_res.magic == kForwardMagic && pull_res.retcode != ForwardSuccess)
             ? pull_res.retcode
             : ForwardInternalError;
     MakeResponse(&res, req, err);
-    SendSync(fd, &res, sizeof(res));
+    SendResponseHeader(fd, res);
     close(next_fd);
     return -1;
   }
 
-  ForwardFile pull_fmeta;
-  if (RecvSync(next_fd, &pull_fmeta, sizeof(pull_fmeta)) != 0 ||
-      pull_fmeta.length == 0 || pull_fmeta.length > kMaxFilenameLen) {
-    LOG_ERROR("recv or validate pull fmeta error");
+  ForwardFile *pull_fmeta_buf = NULL;
+  if (RecvFileMeta(next_fd, &pull_fmeta_buf) != 0) {
+    LOG_ERROR("recv pull fmeta error");
     MakeResponse(&res, req, ForwardInterrupt);
-    SendSync(fd, &res, sizeof(res));
+    SendResponseHeader(fd, res);
     close(next_fd);
     return -1;
   }
 
-  uint32_t fmeta_total_len = sizeof(ForwardFile) + pull_fmeta.length;
+  uint64_t fmeta_total_len = sizeof(ForwardFile) + pull_fmeta_buf->length;
   if (pull_res.length < sizeof(ForwardResponse) + fmeta_total_len) {
-    LOG_ERROR("invalid pull_res length %u", pull_res.length);
-    MakeResponse(&res, req, ForwardInvalidRequest);
-    SendSync(fd, &res, sizeof(res));
-    close(next_fd);
-    return -1;
-  }
-
-  ForwardFile *pull_fmeta_buf =
-      static_cast<ForwardFile *>(malloc(fmeta_total_len + 1));
-  if (!pull_fmeta_buf) {
-    LOG_ERROR("malloc error");
-    MakeResponse(&res, req, ForwardInternalError);
-    SendSync(fd, &res, sizeof(res));
-    close(next_fd);
-    return -1;
-  }
-  pull_fmeta_buf->length = pull_fmeta.length;
-  if (RecvSync(next_fd, pull_fmeta_buf->filename, pull_fmeta.length) != 0) {
-    LOG_ERROR("recv filename error");
+    LOG_ERROR("invalid pull_res length %llu",
+              static_cast<unsigned long long>(pull_res.length));
     free(pull_fmeta_buf);
-    MakeResponse(&res, req, ForwardInterrupt);
-    SendSync(fd, &res, sizeof(res));
+    MakeResponse(&res, req, ForwardInvalidRequest);
+    SendResponseHeader(fd, res);
     close(next_fd);
     return -1;
   }
-  pull_fmeta_buf->filename[pull_fmeta.length - 1] = '\0';
 
-  // Begin streaming push header + metadata + file data back to upstream caller.
-  if (SendSync(fd, &pull_res, sizeof(pull_res)) != 0 ||
-      SendSync(fd, pull_fmeta_buf, fmeta_total_len) != 0) {
+  // Forward pull data header + file metadata upstream before streaming payload.
+  if (SendResponseHeader(fd, pull_res) != 0 ||
+      SendFileMeta(fd, reinterpret_cast<const char *>(pull_fmeta_buf->filename),
+                   pull_fmeta_buf->length) != 0) {
     LOG_ERROR("send pull header/fmeta upstream error");
     free(pull_fmeta_buf);
     close(next_fd);
     return -1;
   }
 
-  uint32_t f_length =
+  uint64_t f_length =
       pull_res.length - sizeof(ForwardResponse) - fmeta_total_len;
-  int sf_ret = StoreAndForward(next_fd, fd, pull_fmeta_buf, f_length);
+  bool store_copy =
+      ((req->flags & kFlagStoreOnHop) != 0) || g_always_store_on_hop;
+  uint8_t stream_err = ForwardSuccess;
+  int sf_ret = StreamOrTeeForward(next_fd, fd, pull_fmeta_buf, f_length,
+                                  pull_res.crc32, store_copy, &stream_err);
   free(pull_fmeta_buf);
-  if (sf_ret != 0) {
-    LOG_ERROR("pull store and forward error");
+  if (sf_ret != 0 && stream_err == ForwardInterrupt) {
     close(next_fd);
     return -1;
   }
 
   ForwardResponse final_res;
-  uint8_t final_code = ForwardSuccess;
-  if (RecvSync(next_fd, &final_res, sizeof(final_res)) != 0) {
+  uint8_t final_code = stream_err;
+  if (RecvResponseHeader(next_fd, &final_res) != 0) {
     LOG_ERROR("recv final pull response from next node error");
-    final_code = ForwardInterrupt;
-  } else if (final_res.magic != kForwardMagic) {
+    if (final_code == ForwardSuccess) {
+      final_code = ForwardInterrupt;
+    }
+  } else if (final_res.magic != kForwardMagic ||
+             final_res.version != kForwardVersion) {
     final_code = ForwardInternalError;
-  } else {
+  } else if (final_res.retcode != ForwardSuccess) {
     final_code = final_res.retcode;
   }
 
   close(next_fd);
   MakeResponse(&res, req, final_code);
-  if (SendSync(fd, &res, sizeof(res)) != 0) {
+  if (SendResponseHeader(fd, res) != 0) {
     LOG_ERROR("send final pull response error");
     return -1;
   }
@@ -321,19 +329,20 @@ int StoreLocal(int fd, const ForwardRequest *req, const ForwardFile *fmeta) {
   uint64_t header_overhead =
       sizeof(ForwardRequest) + sizeof(ForwardFile) + fmeta->length;
   if (req->length < header_overhead) {
-    LOG_ERROR("invalid StoreLocal length %u", req->length);
+    LOG_ERROR("invalid StoreLocal length %llu",
+              static_cast<unsigned long long>(req->length));
     MakeResponse(&res, req, ForwardInvalidRequest);
-    SendSync(fd, &res, sizeof(res));
+    SendResponseHeader(fd, res);
     return -1;
   }
-  uint32_t data_len = static_cast<uint32_t>(req->length - header_overhead);
+  uint64_t data_len = req->length - header_overhead;
 
   std::string local_name =
       ExtractBasename(reinterpret_cast<const char *>(fmeta->filename));
   if (local_name.empty()) {
     LOG_ERROR("invalid local filename");
     MakeResponse(&res, req, ForwardInvalidRequest);
-    SendSync(fd, &res, sizeof(res));
+    SendResponseHeader(fd, res);
     return -1;
   }
 
@@ -342,35 +351,47 @@ int StoreLocal(int fd, const ForwardRequest *req, const ForwardFile *fmeta) {
   if (tmp_fd < 0) {
     LOG_ERROR("mkstemp error, %d", errno);
     MakeResponse(&res, req, ForwardInternalError);
-    SendSync(fd, &res, sizeof(res));
+    SendResponseHeader(fd, res);
     return -1;
   }
   fchmod(tmp_fd, kDefaultFileMode);
 
-  if (ForwardSync(fd, tmp_fd, data_len) != 0) {
-    LOG_ERROR("forward data error");
+  uint32_t actual_crc32 = 0;
+  if (RelayStream(fd, tmp_fd, -1, data_len, &actual_crc32) != 0) {
+    LOG_ERROR("receive data error");
     close(tmp_fd);
     unlink(tmp_path);
     MakeResponse(&res, req, ForwardInterrupt);
-    SendSync(fd, &res, sizeof(res));
+    SendResponseHeader(fd, res);
     return -1;
   }
   close(tmp_fd);
+
+  if (actual_crc32 != req->crc32) {
+    LOG_ERROR("StoreLocal crc32 mismatch for %s: expected 0x%08x, got 0x%08x",
+              local_name.c_str(), req->crc32, actual_crc32);
+    unlink(tmp_path);
+    MakeResponse(&res, req, ForwardChecksumMismatch);
+    SendResponseHeader(fd, res);
+    return -1;
+  }
 
   if (rename(tmp_path, local_name.c_str()) != 0) {
     LOG_ERROR("rename temp to %s error, %d", local_name.c_str(), errno);
     unlink(tmp_path);
     MakeResponse(&res, req, ForwardInternalError);
-    SendSync(fd, &res, sizeof(res));
+    SendResponseHeader(fd, res);
     return -1;
   }
 
   MakeResponse(&res, req, ForwardSuccess);
-  if (SendSync(fd, &res, sizeof(res)) != 0) {
+  if (SendResponseHeader(fd, res) != 0) {
     LOG_ERROR("send response error");
     return -1;
   }
-  LOG_INFO("store file(%s) to local (%u bytes)", local_name.c_str(), data_len);
+  LOG_INFO("store file(%s) to local (%llu bytes, crc32=0x%08x)",
+           local_name.c_str(), static_cast<unsigned long long>(data_len),
+           actual_crc32);
   return 0;
 }
 
@@ -384,7 +405,7 @@ int PullFileToClient(int fd, const ForwardRequest *req,
     uint8_t code =
         (errno == ENOENT) ? ForwardFileNotFound : ForwardInternalError;
     MakeResponse(&res, req, code);
-    SendSync(fd, &res, sizeof(res));
+    SendResponseHeader(fd, res);
     return -1;
   }
 
@@ -393,70 +414,55 @@ int PullFileToClient(int fd, const ForwardRequest *req,
     LOG_ERROR("stat/regular file check failed for %s", fname);
     close(r_fd);
     MakeResponse(&res, req, ForwardInternalError);
-    SendSync(fd, &res, sizeof(res));
+    SendResponseHeader(fd, res);
     return -1;
   }
 
   uint64_t f_size = static_cast<uint64_t>(s.st_size);
-  size_t fname_len = strlen(fname);
-  uint32_t fmeta_length =
-      static_cast<uint32_t>(sizeof(ForwardFile) + fname_len + 1);
-  uint64_t total_resp_len = sizeof(ForwardResponse) + fmeta_length + f_size;
-  if (total_resp_len > UINT32_MAX) {
-    LOG_ERROR("file too large for v1 protocol: %llu bytes",
-              static_cast<unsigned long long>(f_size));
+  uint32_t file_crc32 = 0;
+  if (ComputeFileCrc32(r_fd, f_size, &file_crc32) != 0) {
     close(r_fd);
     MakeResponse(&res, req, ForwardInternalError);
-    SendSync(fd, &res, sizeof(res));
+    SendResponseHeader(fd, res);
     return -1;
   }
 
-  ForwardFile *resp_fmeta = static_cast<ForwardFile *>(malloc(fmeta_length));
-  if (!resp_fmeta) {
-    LOG_ERROR("malloc error");
-    close(r_fd);
-    MakeResponse(&res, req, ForwardInternalError);
-    SendSync(fd, &res, sizeof(res));
-    return -1;
-  }
+  uint32_t fname_with_nul = static_cast<uint32_t>(strlen(fname) + 1);
+  uint64_t fmeta_length = sizeof(ForwardFile) + fname_with_nul;
 
   ForwardResponse resp_res;
   memset(&resp_res, 0, sizeof(resp_res));
-  resp_res.length = static_cast<uint32_t>(total_resp_len);
+  resp_res.length = sizeof(ForwardResponse) + fmeta_length + f_size;
   resp_res.magic = kForwardMagic;
-  resp_res.version = kForwardVersion1;
+  resp_res.version = kForwardVersion;
   resp_res.cmd = ForwardPush;
   resp_res.ttl = 0;
   resp_res.retcode = ForwardSuccess;
   resp_res.id = req->id;
+  resp_res.crc32 = file_crc32;
 
-  resp_fmeta->length = static_cast<uint32_t>(fname_len + 1);
-  memcpy(resp_fmeta->filename, fname, fname_len);
-  resp_fmeta->filename[fname_len] = '\0';
-
-  if (SendSync(fd, &resp_res, sizeof(resp_res)) != 0 ||
-      SendSync(fd, resp_fmeta, fmeta_length) != 0) {
+  if (SendResponseHeader(fd, resp_res) != 0 ||
+      SendFileMeta(fd, fname, fname_with_nul) != 0) {
     LOG_ERROR("send pull response header/meta error");
-    free(resp_fmeta);
     close(r_fd);
     return -1;
   }
-  free(resp_fmeta);
 
-  int ret = ForwardSync(r_fd, fd, static_cast<size_t>(f_size));
+  int ret = RelayStream(r_fd, fd, -1, f_size, NULL);
   close(r_fd);
 
   if (ret != 0) {
-    LOG_ERROR("forward file data error");
+    LOG_ERROR("stream file data error");
     return -1;
   }
 
   MakeResponse(&res, req, ForwardSuccess);
-  if (SendSync(fd, &res, sizeof(res)) != 0) {
+  if (SendResponseHeader(fd, res) != 0) {
     LOG_ERROR("send final pull response error");
     return -1;
   }
-  LOG_INFO("pull file(%s) to client success", fname);
+  LOG_INFO("pull file(%s) to client success (%llu bytes, crc32=0x%08x)", fname,
+           static_cast<unsigned long long>(f_size), file_crc32);
   return 0;
 }
 
@@ -468,24 +474,26 @@ void HandleConnection(int fd) {
   ForwardNode *fnodes = NULL;
   ForwardFile *fmeta = NULL;
 
-  if (RecvSync(fd, &req, sizeof(ForwardRequest)) != 0) {
+  if (RecvRequestHeader(fd, &req) != 0) {
     LOG_ERROR("recv req header error");
     close(fd);
     return;
   }
 
   LOG_DEBUG(
-      "[header]length %u, magic 0x%x, version %u, cmd %u, ttl %u, id %llu",
-      req.length, req.magic, req.version, req.cmd, req.ttl,
-      static_cast<unsigned long long>(req.id));
+      "[header]len=%llu magic=0x%x ver=%u cmd=%u ttl=%u flags=0x%x "
+      "id=0x%llx crc32=0x%08x",
+      static_cast<unsigned long long>(req.length), req.magic, req.version,
+      req.cmd, req.ttl, req.flags, static_cast<unsigned long long>(req.id),
+      req.crc32);
 
-  if (req.magic != kForwardMagic || req.version != kForwardVersion1 ||
+  if (req.magic != kForwardMagic || req.version != kForwardVersion ||
       (req.cmd != ForwardPull && req.cmd != ForwardPush) ||
       req.ttl > kMaxForwardTTL) {
     LOG_ERROR("invalid request header: magic=0x%x version=%u cmd=%u ttl=%u",
               req.magic, req.version, req.cmd, req.ttl);
     MakeResponse(&res, &req, ForwardInvalidRequest);
-    SendSync(fd, &res, sizeof(res));
+    SendResponseHeader(fd, res);
     close(fd);
     return;
   }
@@ -494,10 +502,11 @@ void HandleConnection(int fd) {
                      static_cast<uint64_t>(req.ttl) * sizeof(ForwardNode) +
                      sizeof(ForwardFile) + 1;
   if (req.length < min_len) {
-    LOG_ERROR("packet length %u smaller than minimum %llu", req.length,
+    LOG_ERROR("packet length %llu smaller than minimum %llu",
+              static_cast<unsigned long long>(req.length),
               static_cast<unsigned long long>(min_len));
     MakeResponse(&res, &req, ForwardInvalidRequest);
-    SendSync(fd, &res, sizeof(res));
+    SendResponseHeader(fd, res);
     close(fd);
     return;
   }
@@ -507,11 +516,11 @@ void HandleConnection(int fd) {
     if (!fnodes) {
       LOG_ERROR("malloc fnodes error");
       MakeResponse(&res, &req, ForwardInternalError);
-      SendSync(fd, &res, sizeof(res));
+      SendResponseHeader(fd, res);
       close(fd);
       return;
     }
-    if (RecvSync(fd, fnodes, sizeof(ForwardNode) * req.ttl) != 0) {
+    if (RecvNodes(fd, fnodes, req.ttl) != 0) {
       LOG_ERROR("recv nodes error");
       free(fnodes);
       close(fd);
@@ -522,9 +531,13 @@ void HandleConnection(int fd) {
     }
   }
 
-  uint32_t f_length = 0;
-  if (RecvSync(fd, &f_length, sizeof(uint32_t)) != 0) {
-    LOG_ERROR("recv file meta length error");
+  int fm_rc = RecvFileMeta(fd, &fmeta);
+  if (fm_rc != 0) {
+    if (fm_rc == -2 || fm_rc == -3) {
+      MakeResponse(&res, &req,
+                   fm_rc == -2 ? ForwardInvalidRequest : ForwardInternalError);
+      SendResponseHeader(fd, res);
+    }
     free(fnodes);
     close(fd);
     return;
@@ -533,43 +546,24 @@ void HandleConnection(int fd) {
   uint64_t header_with_fname =
       sizeof(ForwardRequest) +
       static_cast<uint64_t>(req.ttl) * sizeof(ForwardNode) +
-      sizeof(ForwardFile) + f_length;
-  if (f_length == 0 || f_length > kMaxFilenameLen ||
-      req.length < header_with_fname) {
-    LOG_ERROR("invalid filename length %u (req.length %u)", f_length,
-              req.length);
+      sizeof(ForwardFile) + fmeta->length;
+  if (req.length < header_with_fname) {
+    LOG_ERROR("req.length %llu smaller than header+meta %llu",
+              static_cast<unsigned long long>(req.length),
+              static_cast<unsigned long long>(header_with_fname));
     MakeResponse(&res, &req, ForwardInvalidRequest);
-    SendSync(fd, &res, sizeof(res));
-    free(fnodes);
-    close(fd);
-    return;
-  }
-
-  fmeta =
-      static_cast<ForwardFile *>(malloc(sizeof(ForwardFile) + f_length + 1));
-  if (!fmeta) {
-    LOG_ERROR("malloc fmeta error");
-    MakeResponse(&res, &req, ForwardInternalError);
-    SendSync(fd, &res, sizeof(res));
-    free(fnodes);
-    close(fd);
-    return;
-  }
-  fmeta->length = f_length;
-  if (RecvSync(fd, fmeta->filename, f_length) != 0) {
-    LOG_ERROR("recv file name error");
+    SendResponseHeader(fd, res);
     free(fmeta);
     free(fnodes);
     close(fd);
     return;
   }
-  fmeta->filename[f_length - 1] = '\0';
 
   if (!IsSafeRelativePath(reinterpret_cast<const char *>(fmeta->filename))) {
     LOG_ERROR("rejected unsafe path: %s",
               reinterpret_cast<const char *>(fmeta->filename));
     MakeResponse(&res, &req, ForwardInvalidRequest);
-    SendSync(fd, &res, sizeof(res));
+    SendResponseHeader(fd, res);
     free(fmeta);
     free(fnodes);
     close(fd);
@@ -708,13 +702,15 @@ int ForwardLoop(int sockfd, int num_threads) {
 }
 
 void PrintUsage(const char *prog) {
-  printf("Usage: %s [-p port] [-d dir] [-t threads] [-P pidfile] [-F] [-h]\n",
-         prog);
+  printf(
+      "Usage: %s [-p port] [-d dir] [-t threads] [-P pidfile] [-F] [-S] [-h]\n",
+      prog);
   printf("  -p port     : specify port (default %u)\n", kDefaultPort);
   printf("  -d dir      : specify working directory (default .)\n");
   printf("  -t threads  : number of worker threads (default 4)\n");
   printf("  -P pidfile  : write process PID to pidfile\n");
   printf("  -F          : run in foreground (do not daemonize)\n");
+  printf("  -S          : always cache relayed files on intermediate hops\n");
   printf("  -h          : show this help\n");
 }
 
@@ -738,7 +734,7 @@ int main(int argc, char *argv[]) {
   int num_threads = 4;
   bool foreground = false;
 
-  while ((opt = getopt(argc, argv, "p:d:t:P:Fh")) != -1) {
+  while ((opt = getopt(argc, argv, "p:d:t:P:FSh")) != -1) {
     switch (opt) {
       case 'p':
         port = atoi(optarg);
@@ -762,6 +758,9 @@ int main(int argc, char *argv[]) {
         break;
       case 'F':
         foreground = true;
+        break;
+      case 'S':
+        g_always_store_on_hop = true;
         break;
       case 'h':
         PrintUsage(argv[0]);
@@ -864,8 +863,11 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  LOG_INFO("Forward daemon started (pid=%d, port=%d, dir=%s, foreground=%d)",
-           static_cast<int>(getpid()), port, dir.c_str(), foreground ? 1 : 0);
+  LOG_INFO(
+      "Forward daemon started (pid=%d, port=%d, dir=%s, foreground=%d, "
+      "store_on_hop=%d)",
+      static_cast<int>(getpid()), port, dir.c_str(), foreground ? 1 : 0,
+      g_always_store_on_hop ? 1 : 0);
 
   int rc = ForwardLoop(listen_fd, num_threads);
   if (!pidfile.empty()) {

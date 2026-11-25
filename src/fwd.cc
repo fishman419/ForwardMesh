@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -23,293 +24,238 @@
 typedef std::vector<std::pair<uint32_t, uint32_t>> ForwardAddress;
 
 namespace {
-int SendFile(int fd, const char *fpath, const ForwardAddress &address) {
+uint64_t GenerateRequestId() {
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  uint64_t ts = static_cast<uint64_t>(tv.tv_sec) * 1000000ULL +
+                static_cast<uint64_t>(tv.tv_usec);
+  return (ts << 16) ^ static_cast<uint64_t>(getpid());
+}
+
+int SendFile(int fd, const char *fpath, const ForwardAddress &address,
+             uint8_t flags) {
   int r_fd = -1;
   int ret = 0;
   struct stat s;
   uint64_t f_size = 0;
+  uint32_t file_crc32 = 0;
   std::string base_name;
   ForwardRequest req;
   ForwardResponse res;
-  ForwardFile *fmeta = NULL;
-  ForwardNode *fnodes = NULL;
-  uint32_t fmeta_length = 0;
-  size_t fname_len = 0;
+  std::vector<ForwardNode> fnodes;
+  uint32_t fname_with_nul = 0;
+  uint64_t fmeta_length = 0;
   uint32_t ttl = static_cast<uint32_t>(address.size() - 1);
-  uint64_t total_len = 0;
 
   r_fd = open(fpath, O_RDONLY);
   if (r_fd < 0) {
     LOG_ERROR("open file error, %d", errno);
-    ret = -1;
-    goto out;
+    return -1;
   }
   if (fstat(r_fd, &s) != 0) {
     LOG_ERROR("stat error, fpath %s, %d", fpath, errno);
-    ret = -1;
-    goto out;
+    close(r_fd);
+    return -1;
   }
   f_size = static_cast<uint64_t>(s.st_size);
   base_name = ExtractBasename(fpath);
-  fname_len = base_name.size();
-  if (fname_len == 0 || fname_len + 1 > kMaxFilenameLen) {
+  if (base_name.empty() || base_name.size() + 1 > kMaxFilenameLen) {
     LOG_ERROR("invalid filename: %s", fpath);
-    ret = -1;
-    goto out;
+    close(r_fd);
+    return -1;
   }
 
-  fmeta_length = static_cast<uint32_t>(sizeof(ForwardFile) + fname_len + 1);
-  total_len = sizeof(req) + static_cast<uint64_t>(ttl) * sizeof(ForwardNode) +
-              fmeta_length + f_size;
-  if (total_len > UINT32_MAX) {
-    LOG_ERROR("file too large for v1 protocol: %llu bytes",
-              static_cast<unsigned long long>(f_size));
-    ret = -1;
-    goto out;
+  if (ComputeFileCrc32(r_fd, f_size, &file_crc32) != 0) {
+    close(r_fd);
+    return -1;
   }
+
+  fname_with_nul = static_cast<uint32_t>(base_name.size() + 1);
+  fmeta_length = sizeof(ForwardFile) + fname_with_nul;
 
   memset(&req, 0, sizeof(req));
-  req.length = static_cast<uint32_t>(total_len);
+  req.length = sizeof(req) + static_cast<uint64_t>(ttl) * sizeof(ForwardNode) +
+               fmeta_length + f_size;
   req.magic = kForwardMagic;
-  req.version = kForwardVersion1;
+  req.version = kForwardVersion;
   req.cmd = ForwardPush;
   req.ttl = static_cast<uint8_t>(ttl);
-  req.id = 0;
-
-  ret = SendSync(fd, &req, sizeof(req));
-  if (ret) {
-    LOG_ERROR("send forward req error");
-    goto out;
-  }
+  req.flags = flags;
+  req.id = GenerateRequestId();
+  req.crc32 = file_crc32;
 
   if (ttl > 0) {
-    fnodes = static_cast<ForwardNode *>(malloc(ttl * sizeof(ForwardNode)));
-    if (!fnodes) {
-      LOG_ERROR("malloc fnodes error");
-      ret = -1;
-      goto out;
-    }
+    fnodes.resize(ttl);
     for (size_t i = 1; i < address.size(); ++i) {
       fnodes[i - 1].ip = address[i].first;
       fnodes[i - 1].port = address[i].second;
-      LOG_DEBUG("ip %u port %u", fnodes[i - 1].ip, fnodes[i - 1].port);
-    }
-    ret = SendSync(fd, fnodes, ttl * sizeof(ForwardNode));
-    if (ret) {
-      LOG_ERROR("send forward nodes error");
-      goto out;
+      LOG_DEBUG("hop[%zu] ip=%u port=%u", i - 1, fnodes[i - 1].ip,
+                fnodes[i - 1].port);
     }
   }
 
-  fmeta = static_cast<ForwardFile *>(malloc(fmeta_length));
-  if (!fmeta) {
-    LOG_ERROR("malloc error");
-    ret = -1;
-    goto out;
-  }
-  fmeta->length = static_cast<uint32_t>(fname_len + 1);
-  memcpy(fmeta->filename, base_name.c_str(), fname_len + 1);
-  ret = SendSync(fd, fmeta, fmeta_length);
-  if (ret) {
-    LOG_ERROR("send file meta error");
-    goto out;
-  }
-
-  ret = ForwardSync(r_fd, fd, static_cast<size_t>(f_size));
-  if (ret) {
-    LOG_ERROR("send file data error");
-    goto out;
-  }
-
-  ret = RecvSync(fd, &res, sizeof(res));
-  if (ret) {
-    LOG_ERROR("recv res error");
-    goto out;
-  }
-  if (res.magic != kForwardMagic || res.retcode != ForwardSuccess) {
-    LOG_ERROR("forward failed, magic=0x%x retcode=%u", res.magic, res.retcode);
-    ret = -1;
-  } else {
-    LOG_INFO("push file(%s) success (%llu bytes)", fpath,
-             static_cast<unsigned long long>(f_size));
-  }
-
-out:
-  if (r_fd >= 0) {
+  if (SendRequestHeader(fd, req) != 0 ||
+      SendNodes(fd, fnodes.data(), fnodes.size()) != 0 ||
+      SendFileMeta(fd, base_name.c_str(), fname_with_nul) != 0) {
+    LOG_ERROR("send push header/meta error");
     close(r_fd);
+    return -1;
   }
-  free(fnodes);
-  free(fmeta);
-  return ret;
+
+  ret = RelayStream(r_fd, fd, -1, f_size, NULL);
+  close(r_fd);
+  if (ret != 0) {
+    LOG_ERROR("send file data error");
+    return -1;
+  }
+
+  if (RecvResponseHeader(fd, &res) != 0) {
+    LOG_ERROR("recv response error");
+    return -1;
+  }
+  if (res.magic != kForwardMagic || res.version != kForwardVersion ||
+      res.retcode != ForwardSuccess) {
+    LOG_ERROR("forward failed, magic=0x%x ver=%u retcode=%u", res.magic,
+              res.version, res.retcode);
+    return -1;
+  }
+
+  LOG_INFO("push file(%s) success (%llu bytes, crc32=0x%08x, id=0x%llx)", fpath,
+           static_cast<unsigned long long>(f_size), file_crc32,
+           static_cast<unsigned long long>(req.id));
+  return 0;
 }
 
 int PullFile(int fd, const char *remote_path, const char *local_path,
-             const ForwardAddress &address) {
-  int ret = 0;
-  int w_fd = -1;
-  ForwardRequest req;
-  ForwardResponse res;
-  uint32_t ttl = static_cast<uint32_t>(address.size() - 1);
+             const ForwardAddress &address, uint8_t flags) {
   size_t remote_fname_len = strlen(remote_path);
-  uint32_t fmeta_length = 0;
-  uint32_t recv_fname_len = 0;
-  uint32_t file_data_len = 0;
-  uint32_t total_fmeta_len = 0;
-  ForwardFile recv_fmeta_hdr;
-  ForwardFile *recv_fmeta = NULL;
-  ForwardNode *fnodes = NULL;
-  ForwardFile *fmeta = NULL;
-
   if (!IsSafeRelativePath(remote_path) ||
       remote_fname_len + 1 > kMaxFilenameLen) {
     LOG_ERROR("invalid remote relative path: %s", remote_path);
     return -1;
   }
 
-  fmeta_length =
-      static_cast<uint32_t>(sizeof(ForwardFile) + remote_fname_len + 1);
-  fmeta = static_cast<ForwardFile *>(malloc(fmeta_length));
-  if (!fmeta) {
-    LOG_ERROR("malloc error");
-    return -1;
-  }
+  uint32_t ttl = static_cast<uint32_t>(address.size() - 1);
+  uint32_t fname_with_nul = static_cast<uint32_t>(remote_fname_len + 1);
+  uint64_t fmeta_length = sizeof(ForwardFile) + fname_with_nul;
 
+  ForwardRequest req;
   memset(&req, 0, sizeof(req));
-  req.length = static_cast<uint32_t>(sizeof(req) + ttl * sizeof(ForwardNode) +
-                                     fmeta_length);
+  req.length = sizeof(req) + static_cast<uint64_t>(ttl) * sizeof(ForwardNode) +
+               fmeta_length;
   req.magic = kForwardMagic;
-  req.version = kForwardVersion1;
+  req.version = kForwardVersion;
   req.cmd = ForwardPull;
   req.ttl = static_cast<uint8_t>(ttl);
-  req.id = 0;
+  req.flags = flags;
+  req.id = GenerateRequestId();
+  req.crc32 = 0;
 
-  ret = SendSync(fd, &req, sizeof(req));
-  if (ret) {
-    LOG_ERROR("send pull req error");
-    goto out;
-  }
-
+  std::vector<ForwardNode> fnodes;
   if (ttl > 0) {
-    fnodes = static_cast<ForwardNode *>(malloc(ttl * sizeof(ForwardNode)));
-    if (!fnodes) {
-      LOG_ERROR("malloc fnodes error");
-      ret = -1;
-      goto out;
-    }
+    fnodes.resize(ttl);
     for (size_t i = 1; i < address.size(); ++i) {
       fnodes[i - 1].ip = address[i].first;
       fnodes[i - 1].port = address[i].second;
-      LOG_DEBUG("ip %u port %u", fnodes[i - 1].ip, fnodes[i - 1].port);
-    }
-    ret = SendSync(fd, fnodes, ttl * sizeof(ForwardNode));
-    if (ret) {
-      LOG_ERROR("send pull nodes error");
-      goto out;
+      LOG_DEBUG("hop[%zu] ip=%u port=%u", i - 1, fnodes[i - 1].ip,
+                fnodes[i - 1].port);
     }
   }
 
-  fmeta->length = static_cast<uint32_t>(remote_fname_len + 1);
-  memcpy(fmeta->filename, remote_path, remote_fname_len + 1);
-  ret = SendSync(fd, fmeta, fmeta_length);
-  if (ret) {
-    LOG_ERROR("send pull fmeta error");
-    goto out;
+  if (SendRequestHeader(fd, req) != 0 ||
+      SendNodes(fd, fnodes.data(), fnodes.size()) != 0 ||
+      SendFileMeta(fd, remote_path, fname_with_nul) != 0) {
+    LOG_ERROR("send pull request error");
+    return -1;
   }
 
-  ret = RecvSync(fd, &res, sizeof(res));
-  if (ret) {
+  ForwardResponse res;
+  if (RecvResponseHeader(fd, &res) != 0) {
     LOG_ERROR("recv pull response error");
-    goto out;
+    return -1;
   }
 
-  if (res.magic != kForwardMagic || res.retcode != ForwardSuccess) {
-    LOG_ERROR("pull rejected by server, magic=0x%x retcode=%u", res.magic,
-              res.retcode);
-    ret = -1;
-    goto out;
+  if (res.magic != kForwardMagic || res.version != kForwardVersion ||
+      res.retcode != ForwardSuccess) {
+    LOG_ERROR("pull rejected by server, magic=0x%x ver=%u retcode=%u",
+              res.magic, res.version, res.retcode);
+    return -1;
   }
-
   if (res.cmd != ForwardPush) {
     LOG_ERROR("unexpected response cmd %u", res.cmd);
-    ret = -1;
-    goto out;
+    return -1;
   }
 
-  ret = RecvSync(fd, &recv_fmeta_hdr, sizeof(recv_fmeta_hdr));
-  if (ret) {
-    LOG_ERROR("recv file meta error");
-    goto out;
+  ForwardFile *recv_fmeta = NULL;
+  if (RecvFileMeta(fd, &recv_fmeta) != 0) {
+    LOG_ERROR("recv pull file meta error");
+    return -1;
   }
 
-  if (recv_fmeta_hdr.length == 0 || recv_fmeta_hdr.length > kMaxFilenameLen) {
-    LOG_ERROR("invalid recv file meta length %u", recv_fmeta_hdr.length);
-    ret = -1;
-    goto out;
-  }
-
-  recv_fname_len = recv_fmeta_hdr.length - 1;
-  total_fmeta_len = sizeof(ForwardFile) + recv_fmeta_hdr.length;
-  if (res.length < sizeof(ForwardResponse) + total_fmeta_len) {
-    LOG_ERROR("invalid pull response packet length %u", res.length);
-    ret = -1;
-    goto out;
-  }
-
-  recv_fmeta = static_cast<ForwardFile *>(malloc(total_fmeta_len + 1));
-  if (!recv_fmeta) {
-    LOG_ERROR("malloc error");
-    ret = -1;
-    goto out;
-  }
-  recv_fmeta->length = recv_fmeta_hdr.length;
-  ret = RecvSync(fd, recv_fmeta->filename, recv_fmeta_hdr.length);
-  if (ret) {
-    LOG_ERROR("recv filename error");
-    goto out;
-  }
-  recv_fmeta->filename[recv_fname_len] = '\0';
-
-  file_data_len = res.length - sizeof(ForwardResponse) - total_fmeta_len;
-  w_fd = open(local_path, O_CREAT | O_TRUNC | O_WRONLY, kDefaultFileMode);
-  if (w_fd < 0) {
-    LOG_ERROR("open file(%s) error, %d", local_path, errno);
-    ret = -1;
-    goto out;
-  }
-
-  ret = ForwardSync(fd, w_fd, file_data_len);
-  close(w_fd);
-  w_fd = -1;
-  if (ret) {
-    LOG_ERROR("receive file data error");
-    unlink(local_path);
-    goto out;
-  }
-
-  ret = RecvSync(fd, &res, sizeof(res));
-  if (ret) {
-    LOG_ERROR("recv final response error");
-    unlink(local_path);
-    goto out;
-  }
-
-  if (res.magic == kForwardMagic && res.retcode == ForwardSuccess) {
-    LOG_INFO("pull file(%s) to %s success (%u bytes)", remote_path, local_path,
-             file_data_len);
-  } else {
-    LOG_ERROR("pull failed at final ack, retcode %u", res.retcode);
-    unlink(local_path);
-    ret = -1;
-  }
-
-out:
-  if (w_fd >= 0) {
-    close(w_fd);
-  }
-  free(fnodes);
-  free(fmeta);
+  uint64_t total_fmeta_len = sizeof(ForwardFile) + recv_fmeta->length;
   free(recv_fmeta);
-  return ret;
+  if (res.length < sizeof(ForwardResponse) + total_fmeta_len) {
+    LOG_ERROR("invalid pull response packet length %llu",
+              static_cast<unsigned long long>(res.length));
+    return -1;
+  }
+
+  uint64_t file_data_len =
+      res.length - sizeof(ForwardResponse) - total_fmeta_len;
+  uint32_t expected_crc32 = res.crc32;
+
+  std::string tmp_tmpl = std::string(local_path) + ".part.XXXXXX";
+  std::vector<char> tmp_buf(tmp_tmpl.begin(), tmp_tmpl.end());
+  tmp_buf.push_back('\0');
+  int tmp_fd = mkstemp(tmp_buf.data());
+  if (tmp_fd < 0) {
+    LOG_ERROR("mkstemp(%s) error, %d", tmp_buf.data(), errno);
+    return -1;
+  }
+  fchmod(tmp_fd, kDefaultFileMode);
+
+  uint32_t actual_crc32 = 0;
+  int stream_rc = RelayStream(fd, tmp_fd, -1, file_data_len, &actual_crc32);
+  close(tmp_fd);
+  if (stream_rc != 0) {
+    LOG_ERROR("receive file data error");
+    unlink(tmp_buf.data());
+    return -1;
+  }
+
+  ForwardResponse final_res;
+  if (RecvResponseHeader(fd, &final_res) != 0) {
+    LOG_ERROR("recv final response error");
+    unlink(tmp_buf.data());
+    return -1;
+  }
+
+  if (actual_crc32 != expected_crc32) {
+    LOG_ERROR("pull crc32 mismatch: expected 0x%08x, actual 0x%08x",
+              expected_crc32, actual_crc32);
+    unlink(tmp_buf.data());
+    return -1;
+  }
+
+  if (final_res.magic != kForwardMagic ||
+      final_res.version != kForwardVersion ||
+      final_res.retcode != ForwardSuccess) {
+    LOG_ERROR("pull failed at final ack, retcode %u", final_res.retcode);
+    unlink(tmp_buf.data());
+    return -1;
+  }
+
+  if (rename(tmp_buf.data(), local_path) != 0) {
+    LOG_ERROR("rename(%s -> %s) error, %d", tmp_buf.data(), local_path, errno);
+    unlink(tmp_buf.data());
+    return -1;
+  }
+
+  LOG_INFO("pull file(%s) to %s success (%llu bytes, crc32=0x%08x, id=0x%llx)",
+           remote_path, local_path,
+           static_cast<unsigned long long>(file_data_len), actual_crc32,
+           static_cast<unsigned long long>(req.id));
+  return 0;
 }
 
 int ResolveAddress(const char *raw_str, ForwardAddress *res) {
@@ -370,10 +316,18 @@ void PrintUsage(const char *prog) {
   printf("  -a addr : comma-separated list of ip:port forwarding chain\n");
   printf("  -f file : file to send (push) or local output path (pull)\n");
   printf("  -g file : remote relative file path to get (pull mode)\n");
+  printf(
+      "  -s      : cache file copies on intermediate hops (default: zero-disk "
+      "streaming)\n");
   printf("  -h      : show this help\n");
   printf("Examples:\n");
-  printf("  Push: %s -a 127.0.0.1:40000 -f test.txt\n", prog);
-  printf("  Pull: %s -a 127.0.0.1:40000 -g remote.txt -f local.txt\n", prog);
+  printf("  Push (stream): %s -a 127.0.0.1:40000,127.0.0.1:40001 -f test.txt\n",
+         prog);
+  printf(
+      "  Push (cache) : %s -s -a 127.0.0.1:40000,127.0.0.1:40001 -f test.txt\n",
+      prog);
+  printf("  Pull         : %s -a 127.0.0.1:40000 -g remote.txt -f local.txt\n",
+         prog);
 }
 }  // namespace
 
@@ -390,9 +344,10 @@ int main(int argc, char *argv[]) {
   std::string fpath;
   std::string remote_path;
   bool pull_mode = false;
+  uint8_t flags = kFlagNone;
 
   LOG_INFO("Forward client started");
-  while ((opt = getopt(argc, argv, "a:f:g:h")) != -1) {
+  while ((opt = getopt(argc, argv, "a:f:g:sh")) != -1) {
     switch (opt) {
       case 'a':
         forward_address.clear();
@@ -407,6 +362,9 @@ int main(int argc, char *argv[]) {
       case 'g':
         pull_mode = true;
         remote_path = optarg;
+        break;
+      case 's':
+        flags |= kFlagStoreOnHop;
         break;
       case 'h':
         PrintUsage(argv[0]);
@@ -463,12 +421,13 @@ int main(int argc, char *argv[]) {
   int rc = 0;
   if (pull_mode) {
     const char *out_path = fpath.empty() ? "./downloaded_file" : fpath.c_str();
-    if (PullFile(sockfd, remote_path.c_str(), out_path, forward_address) != 0) {
+    if (PullFile(sockfd, remote_path.c_str(), out_path, forward_address,
+                 flags) != 0) {
       LOG_ERROR("pull file error");
       rc = 1;
     }
   } else {
-    if (SendFile(sockfd, fpath.c_str(), forward_address) != 0) {
+    if (SendFile(sockfd, fpath.c_str(), forward_address, flags) != 0) {
       LOG_ERROR("forward file error");
       rc = 1;
     }

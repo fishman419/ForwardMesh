@@ -15,7 +15,7 @@ make clean
 ## Testing
 
 ```bash
-# Run integration tests
+# Run integration tests (streaming, tee-caching, concurrency, CRC32 tamper, daemon PID)
 make test
 
 # Run AddressSanitizer tests (uses -F foreground mode; works on Linux & macOS)
@@ -25,9 +25,10 @@ make asan-test
 make leaks-check
 ```
 
-## Protocol Stack
+## Protocol Stack (V2)
 
-The protocol uses a packet format: `ForwardHead + ForwardNode[n] + ForwardFile + data`
+Packet layout (big-endian / network byte order on the wire):
+`ForwardHead (28B) + ForwardNode[n] + ForwardFile + data`
 
 When forwarding through a node, the TTL decrements and one `ForwardNode` is consumed:
 - Initial: `ForwardHead + ForwardNode*n + ForwardFile + data`
@@ -35,30 +36,26 @@ When forwarding through a node, the TTL decrements and one `ForwardNode` is cons
 - Final: `ForwardHead + ForwardFile + data`
 
 Key constants in `src/protocol.h`:
-- Magic: `0xFF44AADD`, Version: `1`
-- Default port: `40000`
-- Max TTL: `32`
-- Max filename length: `4096`
-- Buffer size: `16384`
-- Socket timeout: `30s`
-
-Commands: `ForwardPull` (`cmd=0`) requests file from final destination, `ForwardPush` (`cmd=1`) sends file through chain.
+- Magic: `0xFF44AADD`, Version: `2`
+- Packet & file size: `uint64_t` (no 4 GB limit)
+- Payload integrity: IEEE 802.3 `crc32` verified in-flight and before atomic file rename
+- Flags: `kFlagNone (0x00)` = zero-disk cut-through streaming; `kFlagStoreOnHop (0x01)` = single-pass tee caching on intermediate hops
+- Default port: `40000`, Max TTL: `32`, Buffer size: `65536`, Socket timeout: `30s`
 
 ## Architecture
 
 **fwdd** (`src/fwdd.cc`):
-- Supports both double-fork daemon mode (default) and foreground mode (`-F`), plus PID file management (`-P pidfile`) and graceful `SIGINT`/`SIGTERM` shutdown.
-- `CreateListenSocket()` binds before `fork()` so startup port conflicts fail immediately with non-zero exit status.
+- Supports daemon mode (default) and foreground mode (`-F`), PID file (`-P pidfile`), forced hop caching (`-S`), and graceful `SIGINT`/`SIGTERM` shutdown.
+- `CreateListenSocket()` binds before `fork()` so startup port conflicts fail immediately.
 - Thread pool model: `ForwardLoop(sockfd, num_threads)` polls the listen socket and dispatches accepted fds to worker threads (`WorkerThread` -> `HandleConnection`).
-- Validates protocol header (`magic`, `version`, `cmd`, `ttl`, packet & filename bounds) and confines paths inside `-d dir` (`IsSafeRelativePath` / `ExtractBasename`).
-- `StoreAndForward()` / `StoreLocal()` write into temporary files and atomically `rename()` onto target filenames.
-- `ForwardNext()` / `PullForward()` / `PullFileToClient()` handle push and pull chains and propagate `ForwardRetcode` end-to-end.
+- `StreamOrTeeForward()` performs zero-disk cut-through streaming by default, or single-pass tee-to-temp-file + atomic `rename()` when `kFlagStoreOnHop` / `-S` is active, rejecting tampered streams on CRC32 mismatch (`ForwardChecksumMismatch = 6`).
 
 **fwd** (`src/fwd.cc`):
-- `SendFile()` - push mode: sends file through forwarding chain and checks `ForwardResponse::retcode`.
-- `PullFile()` - pull mode: requests relative file path from final node and writes local output cleanly.
-- `ResolveAddress()` - validates IPv4 (`inet_pton == 1`), port (`1..65535`), and hop limit (`<= kMaxForwardTTL`).
+- `SendFile()` - computes file CRC32, assigns a traceable 64-bit request ID, and streams payload through the chain.
+- `PullFile()` - requests relative file path from final node, streams into `.part.XXXXXX`, verifies CRC32 and final ack, then atomically renames onto target output path.
+- `-s` flag sets `kFlagStoreOnHop` on outgoing push/pull requests.
 
 **util.cc / logger.cc**:
-- `SendSync()`, `RecvSync()`, `ForwardSync()` handle `EINTR`, premature EOF (`read == 0`), and short writes.
+- Portable big-endian wire serialization (`SendRequestHeader`, `RecvRequestHeader`, `SendResponseHeader`, `RecvResponseHeader`, `SendNodes`, `RecvNodes`, `SendFileMeta`, `RecvFileMeta`).
+- `RelayStream()` unifies socket/file streaming, optional single-pass teeing, and incremental CRC32 calculation.
 - `logger.cc` serializes log writes with `std::mutex` and `localtime_r()`.

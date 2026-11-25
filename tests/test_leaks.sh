@@ -6,6 +6,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 LEAKS_BIN_DIR="${LEAKS_BIN:-$PROJECT_DIR/bin_leaks}"
 
 WORK_ROOT="$(mktemp -d)"
+BASE_PORT=$(( 48300 + ($$ % 1500) ))
 PIDS=()
 
 cleanup() {
@@ -31,10 +32,10 @@ N2="$WORK_ROOT/n2"
 mkdir -p "$N1" "$N2"
 printf "leak check payload\n" > "$WORK_ROOT/sample.txt"
 
-"$LEAKS_BIN_DIR/fwdd" -F -d "$N2" -p 41302 -t 4 -P "$N2/fwdd.pid" &
+"$LEAKS_BIN_DIR/fwdd" -F -d "$N2" -p $((BASE_PORT + 2)) -t 4 -P "$N2/fwdd.pid" &
 P2=$!
 PIDS+=("$P2")
-"$LEAKS_BIN_DIR/fwdd" -F -d "$N1" -p 41301 -t 4 -P "$N1/fwdd.pid" &
+"$LEAKS_BIN_DIR/fwdd" -F -d "$N1" -p $((BASE_PORT + 1)) -t 4 -P "$N1/fwdd.pid" &
 P1=$!
 PIDS+=("$P1")
 
@@ -43,11 +44,11 @@ for _ in $(seq 1 50); do
     sleep 0.05
 done
 
-echo "[Test 1] Exercising push, pull, and error paths..."
-"$LEAKS_BIN_DIR/fwd" -a 127.0.0.1:41301,127.0.0.1:41302 -f "$WORK_ROOT/sample.txt"
-"$LEAKS_BIN_DIR/fwd" -a 127.0.0.1:41301,127.0.0.1:41302 -g sample.txt -f "$WORK_ROOT/pulled.txt"
+echo "[Test 1] Exercising streaming, tee caching, pull, and error paths..."
+"$LEAKS_BIN_DIR/fwd" -a 127.0.0.1:$((BASE_PORT + 1)),127.0.0.1:$((BASE_PORT + 2)) -f "$WORK_ROOT/sample.txt"
+"$LEAKS_BIN_DIR/fwd" -s -a 127.0.0.1:$((BASE_PORT + 1)),127.0.0.1:$((BASE_PORT + 2)) -g sample.txt -f "$WORK_ROOT/pulled.txt"
 cmp -s "$WORK_ROOT/sample.txt" "$WORK_ROOT/pulled.txt"
-"$LEAKS_BIN_DIR/fwd" -a 127.0.0.1:41301,127.0.0.1:41302 -g missing.txt -f "$WORK_ROOT/none.txt" > /dev/null 2>&1 || true
+"$LEAKS_BIN_DIR/fwd" -a 127.0.0.1:$((BASE_PORT + 1)),127.0.0.1:$((BASE_PORT + 2)) -g missing.txt -f "$WORK_ROOT/none.txt" > /dev/null 2>&1 || true
 
 echo "[Test 2] Inspecting live daemon processes with leaks(1)..."
 for pid in "$P1" "$P2"; do
