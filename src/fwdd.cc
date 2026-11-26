@@ -66,7 +66,12 @@ bool SyncNeighborOnce(const ForwardNode &peer) {
     g_mesh_router.RecordConnectFailure(peer);
     return false;
   }
+  SetSocketTimeout(fd, 2);
   g_mesh_router.RegisterSelfFromSocket(fd);
+  if (g_mesh_router.IsSelf(peer)) {
+    close(fd);
+    return false;
+  }
 
   ForwardRequest req;
   memset(&req, 0, sizeof(req));
@@ -86,9 +91,14 @@ bool SyncNeighborOnce(const ForwardNode &peer) {
   }
 
   ForwardResponse res;
-  if (RecvResponseHeader(fd, &res) != 0 || res.magic != kForwardMagic ||
-      res.version != kForwardVersion || res.cmd != ForwardMeshSync ||
-      res.retcode != ForwardSuccess || res.length < sizeof(ForwardResponse) ||
+  if (RecvResponseHeader(fd, &res) != 0) {
+    close(fd);
+    g_mesh_router.RecordConnectFailure(peer);
+    return false;
+  }
+  if (res.magic != kForwardMagic || res.version != kForwardVersion ||
+      res.cmd != ForwardMeshSync || res.retcode != ForwardSuccess ||
+      res.length < sizeof(ForwardResponse) ||
       (res.length - sizeof(ForwardResponse)) > kMaxSyncPayloadBytes) {
     close(fd);
     return false;
@@ -99,6 +109,7 @@ bool SyncNeighborOnce(const ForwardNode &peer) {
   std::vector<uint8_t> payload(payload_len);
   if (payload_len > 0 && RecvSync(fd, payload.data(), payload_len) != 0) {
     close(fd);
+    g_mesh_router.RecordConnectFailure(peer);
     return false;
   }
   close(fd);
@@ -183,6 +194,10 @@ int EstablishNextHop(const ForwardRequest *req,
         ConnectWithTimeout(p.first_hop.ip, p.first_hop.port, timeout_ms, &rtt);
     if (next_fd >= 0) {
       g_mesh_router.RegisterSelfFromSocket(next_fd);
+      if (g_mesh_router.IsSelf(p.first_hop)) {
+        close(next_fd);
+        continue;
+      }
       *out_plan = p;
       *out_rtt_ms = rtt;
       return next_fd;
@@ -206,6 +221,10 @@ int EstablishNextHop(const ForwardRequest *req,
                                        timeout_ms, &rtt);
       if (next_fd >= 0) {
         g_mesh_router.RegisterSelfFromSocket(next_fd);
+        if (g_mesh_router.IsSelf(p.first_hop)) {
+          close(next_fd);
+          continue;
+        }
         *out_plan = p;
         *out_rtt_ms = rtt;
         return next_fd;

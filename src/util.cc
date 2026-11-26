@@ -354,7 +354,8 @@ bool ParseNodeAddr(const std::string &text, ForwardNode *out) {
     port = static_cast<uint32_t>(parsed);
   }
   uint32_t ip = 0;
-  if (inet_pton(AF_INET, ip_part.c_str(), &ip) != 1) {
+  if (inet_pton(AF_INET, ip_part.c_str(), &ip) != 1 || ip == 0 ||
+      ip == 0xFFFFFFFFU) {
     return false;
   }
   out->ip = ip;
@@ -534,8 +535,8 @@ int DecodeMeshSyncPayload(const uint8_t *buf, size_t len,
 
     e.target.port = ntohl(wire_port);
     e.rtt_ms = ntohs(wire_rtt);
-    if (e.target.port == 0 || e.target.port > 65535 || plen == 0 ||
-        plen > kMaxForwardTTL) {
+    if (e.target.ip == 0 || e.target.ip == 0xFFFFFFFFU || e.target.port == 0 ||
+        e.target.port > 65535 || plen == 0 || plen > kMaxForwardTTL) {
       return -1;
     }
     size_t path_bytes = static_cast<size_t>(plen) * sizeof(ForwardNode);
@@ -548,7 +549,8 @@ int DecodeMeshSyncPayload(const uint8_t *buf, size_t len,
       memcpy(&e.path[j].ip, buf + off, 4);
       memcpy(&hop_port, buf + off + 4, 4);
       e.path[j].port = ntohl(hop_port);
-      if (e.path[j].port == 0 || e.path[j].port > 65535) {
+      if (e.path[j].ip == 0 || e.path[j].ip == 0xFFFFFFFFU ||
+          e.path[j].port == 0 || e.path[j].port > 65535) {
         return -1;
       }
       off += sizeof(ForwardNode);

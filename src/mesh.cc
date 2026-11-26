@@ -3,6 +3,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,10 +51,28 @@ bool PathContainsNode(const std::vector<ForwardNode> &path,
   }
   return false;
 }
+void CollectLocalInterfaceIps(std::set<uint32_t> *ips) {
+  ips->insert(htonl(INADDR_LOOPBACK));
+  struct ifaddrs *ifaddr = NULL;
+  if (getifaddrs(&ifaddr) != 0 || !ifaddr) {
+    return;
+  }
+  for (struct ifaddrs *ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+    if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) {
+      continue;
+    }
+    const struct sockaddr_in *sin =
+        reinterpret_cast<const struct sockaddr_in *>(ifa->ifa_addr);
+    if (sin->sin_addr.s_addr != 0) {
+      ips->insert(sin->sin_addr.s_addr);
+    }
+  }
+  freeifaddrs(ifaddr);
+}
 }  // namespace
 
 MeshRouter::MeshRouter() : listen_port_(kDefaultPort), heartbeat_ms_(3000) {
-  self_ips_.insert(htonl(INADDR_LOOPBACK));
+  CollectLocalInterfaceIps(&self_ips_);
 }
 
 void MeshRouter::Init(uint32_t listen_port, const std::string &persist_path,
@@ -63,7 +82,7 @@ void MeshRouter::Init(uint32_t listen_port, const std::string &persist_path,
   persist_path_ = persist_path;
   heartbeat_ms_ = heartbeat_ms;
   self_ips_.clear();
-  self_ips_.insert(htonl(INADDR_LOOPBACK));
+  CollectLocalInterfaceIps(&self_ips_);
   neighbors_.clear();
   routes_.clear();
 }
@@ -98,7 +117,13 @@ bool MeshRouter::IsSelf(const ForwardNode &node) const {
 }
 
 bool MeshRouter::IsSelfLocked(const ForwardNode &node) const {
-  return node.port == listen_port_ && self_ips_.count(node.ip) > 0;
+  if (node.port != listen_port_) {
+    return false;
+  }
+  if (node.ip == 0 || (ntohl(node.ip) >> 24) == 127) {
+    return true;
+  }
+  return self_ips_.count(node.ip) > 0;
 }
 
 bool MeshRouter::IsValidPathLocked(const std::vector<ForwardNode> &path) const {
@@ -107,7 +132,8 @@ bool MeshRouter::IsValidPathLocked(const std::vector<ForwardNode> &path) const {
   }
   std::set<uint64_t> seen;
   for (const auto &n : path) {
-    if (n.port == 0 || n.port > 65535 || IsSelfLocked(n)) {
+    if (n.ip == 0 || n.ip == 0xFFFFFFFFU || n.port == 0 || n.port > 65535 ||
+        IsSelfLocked(n)) {
       return false;
     }
     uint64_t k = NodeKey(n);
@@ -173,6 +199,15 @@ bool MeshRouter::UpsertCandidateLocked(uint64_t target_key,
     if (SameNode(existing.next_hop, cand.next_hop)) {
       if (!allow_overwrite_authoritative && !existing.provisional &&
           cand.provisional) {
+        if (SamePath(existing.path, cand.path)) {
+          existing.healthy = cand.healthy;
+          existing.updated_ms = cand.updated_ms;
+          return false;
+        }
+        if (!existing.healthy && cand.healthy) {
+          existing = cand;
+          return true;
+        }
         return false;
       }
       bool topo_changed = !SamePath(existing.path, cand.path) ||

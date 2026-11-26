@@ -302,12 +302,18 @@ if "$BIN_DIR/fwd" -a "127.0.0.1:$L1,127.0.0.1:$GHOST" -f "$WORK_ROOT/m_seed.txt"
     exit 1
 fi
 
-# FT-02: Malformed ForwardMeshSync request with invalid non-28B length
+# FT-02: Truncated (<28B) sync header, bogus-length sync request, and bad-CRC32 sync response
 if command -v python3 > /dev/null 2>&1; then
     python3 - "$L1" << 'PYEOF'
-import socket, struct, sys
+import socket, struct, sys, threading
+
 port = int(sys.argv[1])
-# cmd=2 (ForwardMeshSync) with bogus length=999 -> must return ForwardInvalidRequest(4)
+
+# 1) Truncated 12-byte partial header + EOF
+with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+    s.sendall(b"\x00\x00\x00\x00\x00\x00\x00\x1c\xff\x44\xaa\xdd")
+
+# 2) cmd=2 (ForwardMeshSync) with bogus length=999 -> ForwardInvalidRequest(4)
 hdr = struct.pack("!QIBBBBQI", 999, 0xFF44AADD, 2, 2, 0, 0, 0x7777, 0)
 with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
     s.sendall(hdr)
@@ -316,6 +322,46 @@ with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
     _, magic, ver, cmd, ttl, retcode, _, _ = struct.unpack("!QIBBBBQI", resp)
     assert magic == 0xFF44AADD and retcode == 4, f"expected 4, got {retcode}"
 PYEOF
+
+    # 3) Mock neighbor serving forged-CRC32 ForwardMeshSync response must be rejected
+    MOCK_PORT=$((BASE_PORT + 58))
+    MD_BAD="$WORK_ROOT/ft2_badsync"
+    mkdir -p "$MD_BAD"
+    cat > "$MD_BAD/mesh_routes.dat" << EOF
+NEIGHBOR 127.0.0.1:$MOCK_PORT 1
+EOF
+    python3 - "$MOCK_PORT" << 'PYEOF' &
+import socket, struct, sys
+mport = int(sys.argv[1])
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", mport))
+srv.listen(4)
+srv.settimeout(5)
+try:
+    conn, _ = srv.accept()
+    _ = conn.recv(28)
+    poison_ip = socket.inet_aton("10.99.99.99")
+    entry = poison_ip + struct.pack("!IHBB", 49999, 1, 1, 1) + poison_ip + struct.pack("!I", 49999)
+    payload = struct.pack("!I", 1) + entry
+    # Deliberately wrong crc32 = 0xDEADBEEF
+    rhdr = struct.pack("!QIBBBBQI", 28 + len(payload), 0xFF44AADD, 2, 2, 0, 0, 0, 0xDEADBEEF)
+    conn.sendall(rhdr + payload)
+    conn.close()
+except Exception:
+    pass
+finally:
+    srv.close()
+PYEOF
+    MOCK_PID=$!
+    sleep 0.1
+    start_mesh_node "$MD_BAD" $((BASE_PORT + 57)) 5000 ""; PID_BAD="$NODE_STARTED_PID"
+    wait "$MOCK_PID" 2>/dev/null || true
+    if "$BIN_DIR/fwd" -a "127.0.0.1:$((BASE_PORT + 57))" -l | grep -q "10.99.99.99"; then
+        echo "  FAIL: Forged-CRC32 sync route was accepted"
+        exit 1
+    fi
+    stop_node "$PID_BAD"
 fi
 
 # Nodes remain healthy after loop breaker and malformed packet

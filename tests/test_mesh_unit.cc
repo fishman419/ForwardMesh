@@ -299,6 +299,52 @@ void TestPersistenceCorruptLinesAndBypass() {
   rmdir(tmp_dir);
   printf("  PASS\n");
 }
+
+void TestSelfDiscoveryZeroIpAndDegradedRecovery() {
+  printf("[UT-06] TestSelfDiscoveryZeroIpAndDegradedRecovery...\n");
+  ForwardNode parsed;
+  assert(!ParseNodeAddr("0.0.0.0:40001", &parsed));
+  assert(!ParseNodeAddr("255.255.255.255:40001", &parsed));
+
+  MeshRouter router;
+  router.Init(40001, "", 3000);
+  assert(router.IsSelf(MakeNode("127.0.0.2", 40001)));
+  ForwardNode zero_node{0, 40001};
+  assert(router.IsSelf(zero_node));
+
+  // Degraded authoritative route must recover healthy=true after default
+  // (non-strict, authoritative=false) successful transfer
+  ForwardNode n2a = MakeNode("10.10.0.2", 40002);
+  ForwardNode n3 = MakeNode("10.20.0.3", 40003);
+  MeshSyncEntry up_entry{n3, 5, 1, {n3}};
+  router.ApplyNeighborSync(n2a, 2, {up_entry});
+
+  MeshSyncEntry down_entry{n3, 5, 0, {n3}};
+  router.ApplyNeighborSync(n2a, 2, {down_entry});
+
+  std::vector<MeshSyncEntry> snap_down = router.ExportSyncSnapshot();
+  bool found_down = false;
+  for (const auto &e : snap_down) {
+    if (SameNode(e.target, n3)) {
+      assert(e.alive == 0);
+      found_down = true;
+    }
+  }
+  assert(found_down);
+
+  // Default transfer succeeds -> must restore alive == 1!
+  router.RecordTransferSuccess(n2a, 2, {n3}, /*authoritative=*/false);
+  std::vector<MeshSyncEntry> snap_up = router.ExportSyncSnapshot();
+  bool found_up = false;
+  for (const auto &e : snap_up) {
+    if (SameNode(e.target, n3)) {
+      assert(e.alive == 1);
+      found_up = true;
+    }
+  }
+  assert(found_up);
+  printf("  PASS\n");
+}
 }  // namespace
 
 int main() {
@@ -308,6 +354,7 @@ int main() {
   TestFlagsBitfieldAndHopBudget();
   TestSyncCodecAndRemoteDegradation();
   TestPersistenceCorruptLinesAndBypass();
+  TestSelfDiscoveryZeroIpAndDegradedRecovery();
   printf("=== All unit tests passed ===\n");
   return 0;
 }
