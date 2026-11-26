@@ -2,6 +2,9 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +12,8 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <chrono>
 #include <vector>
 
 #include "logger.h"
@@ -28,7 +33,55 @@ struct Crc32Table {
 };
 
 const Crc32Table kCrcTable;
+
+bool IsPeerDeniedByEnv(uint32_t ip, uint32_t port) {
+  const char *deny_env = getenv("FWDD_DENY_PEERS");
+  if (!deny_env || deny_env[0] == '\0') {
+    return false;
+  }
+  ForwardNode target{ip, port};
+  std::string target_str = FormatNodeAddr(target);
+  std::string list(deny_env);
+  size_t pos = 0;
+  while (pos < list.size()) {
+    size_t comma = list.find(',', pos);
+    std::string token = (comma == std::string::npos)
+                            ? list.substr(pos)
+                            : list.substr(pos, comma - pos);
+    if (token == target_str) {
+      return true;
+    }
+    if (comma == std::string::npos) {
+      break;
+    }
+    pos = comma + 1;
+  }
+  return false;
+}
+
+void AppendU32(std::vector<uint8_t> *buf, uint32_t host_val) {
+  uint32_t net = htonl(host_val);
+  const uint8_t *p = reinterpret_cast<const uint8_t *>(&net);
+  buf->insert(buf->end(), p, p + sizeof(net));
+}
+
+void AppendRawU32(std::vector<uint8_t> *buf, uint32_t raw_nbo) {
+  const uint8_t *p = reinterpret_cast<const uint8_t *>(&raw_nbo);
+  buf->insert(buf->end(), p, p + sizeof(raw_nbo));
+}
+
+void AppendU16(std::vector<uint8_t> *buf, uint16_t host_val) {
+  uint16_t net = htons(host_val);
+  const uint8_t *p = reinterpret_cast<const uint8_t *>(&net);
+  buf->insert(buf->end(), p, p + sizeof(net));
+}
 }  // namespace
+
+uint64_t SteadyNowMs() {
+  auto now = std::chrono::steady_clock::now().time_since_epoch();
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
+}
 
 uint64_t HostToNet64(uint64_t val) {
   uint32_t high = htonl(static_cast<uint32_t>(val >> 32));
@@ -181,6 +234,134 @@ int SetSocketTimeout(int fd, int timeout_sec) {
   return 0;
 }
 
+int ConnectWithTimeout(uint32_t ip, uint32_t port, int timeout_ms,
+                       uint16_t *out_rtt_ms) {
+  if (IsPeerDeniedByEnv(ip, port)) {
+    LOG_DEBUG("[UTIL]peer %s denied by FWDD_DENY_PEERS",
+              FormatNodeAddr({ip, port}).c_str());
+    return -2;
+  }
+
+  uint64_t start_ms = SteadyNowMs();
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) {
+    LOG_ERROR("[UTIL]socket error, %d", errno);
+    return -1;
+  }
+
+  int orig_flags = fcntl(fd, F_GETFL, 0);
+  if (orig_flags < 0 || fcntl(fd, F_SETFL, orig_flags | O_NONBLOCK) < 0) {
+    LOG_ERROR("[UTIL]fcntl O_NONBLOCK error, %d", errno);
+    close(fd);
+    return -1;
+  }
+
+  struct sockaddr_in dst_addr;
+  memset(&dst_addr, 0, sizeof(dst_addr));
+  dst_addr.sin_family = AF_INET;
+  dst_addr.sin_port = htons(static_cast<uint16_t>(port));
+  dst_addr.sin_addr.s_addr = ip;
+
+  int rc = connect(fd, reinterpret_cast<struct sockaddr *>(&dst_addr),
+                   sizeof(dst_addr));
+  if (rc < 0) {
+    if (errno != EINPROGRESS) {
+      LOG_DEBUG("[UTIL]connect immediate failure to %s, errno=%d",
+                FormatNodeAddr({ip, port}).c_str(), errno);
+      close(fd);
+      return -2;
+    }
+
+    uint64_t deadline = start_ms + static_cast<uint64_t>(timeout_ms);
+    while (true) {
+      uint64_t now = SteadyNowMs();
+      if (now >= deadline) {
+        LOG_DEBUG("[UTIL]connect timeout to %s",
+                  FormatNodeAddr({ip, port}).c_str());
+        close(fd);
+        return -2;
+      }
+      struct pollfd pfd;
+      pfd.fd = fd;
+      pfd.events = POLLOUT;
+      pfd.revents = 0;
+      int pret = poll(&pfd, 1, static_cast<int>(deadline - now));
+      if (pret < 0) {
+        if (errno == EINTR) {
+          continue;
+        }
+        close(fd);
+        return -2;
+      }
+      if (pret == 0) {
+        close(fd);
+        return -2;
+      }
+      int so_err = 0;
+      socklen_t slen = sizeof(so_err);
+      if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_err, &slen) < 0 ||
+          so_err != 0) {
+        LOG_DEBUG("[UTIL]connect SO_ERROR=%d to %s", so_err,
+                  FormatNodeAddr({ip, port}).c_str());
+        close(fd);
+        return -2;
+      }
+      break;
+    }
+  }
+
+  if (fcntl(fd, F_SETFL, orig_flags) < 0) {
+    close(fd);
+    return -1;
+  }
+  SetSocketTimeout(fd, kDefaultSocketTimeoutSec);
+
+  uint64_t elapsed = SteadyNowMs() - start_ms;
+  uint16_t rtt = static_cast<uint16_t>(
+      std::max<uint64_t>(1, std::min<uint64_t>(65535, elapsed)));
+  if (out_rtt_ms) {
+    *out_rtt_ms = rtt;
+  }
+  return fd;
+}
+
+std::string FormatNodeAddr(const ForwardNode &node) {
+  char ip_buf[INET_ADDRSTRLEN] = {0};
+  if (!inet_ntop(AF_INET, &node.ip, ip_buf, sizeof(ip_buf))) {
+    return "0.0.0.0:0";
+  }
+  return std::string(ip_buf) + ":" + std::to_string(node.port);
+}
+
+bool ParseNodeAddr(const std::string &text, ForwardNode *out) {
+  if (text.empty() || !out) {
+    return false;
+  }
+  size_t colon = text.find(':');
+  std::string ip_part = text;
+  uint32_t port = kDefaultPort;
+  if (colon != std::string::npos) {
+    ip_part = text.substr(0, colon);
+    std::string port_part = text.substr(colon + 1);
+    if (port_part.empty()) {
+      return false;
+    }
+    char *endptr = NULL;
+    long parsed = strtol(port_part.c_str(), &endptr, 10);
+    if (*endptr != '\0' || parsed <= 0 || parsed > 65535) {
+      return false;
+    }
+    port = static_cast<uint32_t>(parsed);
+  }
+  uint32_t ip = 0;
+  if (inet_pton(AF_INET, ip_part.c_str(), &ip) != 1) {
+    return false;
+  }
+  out->ip = ip;
+  out->port = port;
+  return true;
+}
+
 int SendRequestHeader(int fd, const ForwardRequest &host_req) {
   ForwardRequest wire_req;
   memset(&wire_req, 0, sizeof(wire_req));
@@ -298,6 +479,84 @@ int RecvFileMeta(int fd, ForwardFile **out_fmeta) {
   fmeta->filename[f_length - 1] = '\0';
   *out_fmeta = fmeta;
   return 0;
+}
+
+void EncodeMeshSyncPayload(const std::vector<MeshSyncEntry> &entries,
+                           std::vector<uint8_t> *out_buf) {
+  out_buf->clear();
+  uint32_t count =
+      static_cast<uint32_t>(std::min<size_t>(entries.size(), kMaxMeshRoutes));
+  AppendU32(out_buf, count);
+  for (uint32_t i = 0; i < count; ++i) {
+    const MeshSyncEntry &e = entries[i];
+    uint8_t plen =
+        static_cast<uint8_t>(std::min<size_t>(e.path.size(), kMaxForwardTTL));
+    AppendRawU32(out_buf, e.target.ip);
+    AppendU32(out_buf, e.target.port);
+    AppendU16(out_buf, e.rtt_ms);
+    out_buf->push_back(plen);
+    out_buf->push_back(e.alive ? 1 : 0);
+    for (uint8_t j = 0; j < plen; ++j) {
+      AppendRawU32(out_buf, e.path[j].ip);
+      AppendU32(out_buf, e.path[j].port);
+    }
+  }
+}
+
+int DecodeMeshSyncPayload(const uint8_t *buf, size_t len,
+                          std::vector<MeshSyncEntry> *out_entries) {
+  if (!buf || !out_entries || len < sizeof(uint32_t)) {
+    return -1;
+  }
+  out_entries->clear();
+  uint32_t wire_count = 0;
+  memcpy(&wire_count, buf, sizeof(uint32_t));
+  uint32_t count = ntohl(wire_count);
+  if (count > kMaxMeshRoutes) {
+    return -1;
+  }
+
+  size_t off = sizeof(uint32_t);
+  out_entries->reserve(count);
+  for (uint32_t i = 0; i < count; ++i) {
+    if (len - off < 12) {
+      return -1;
+    }
+    MeshSyncEntry e;
+    uint32_t wire_port = 0;
+    uint16_t wire_rtt = 0;
+    memcpy(&e.target.ip, buf + off, 4);
+    memcpy(&wire_port, buf + off + 4, 4);
+    memcpy(&wire_rtt, buf + off + 8, 2);
+    uint8_t plen = buf[off + 10];
+    e.alive = buf[off + 11];
+    off += 12;
+
+    e.target.port = ntohl(wire_port);
+    e.rtt_ms = ntohs(wire_rtt);
+    if (e.target.port == 0 || e.target.port > 65535 || plen == 0 ||
+        plen > kMaxForwardTTL) {
+      return -1;
+    }
+    size_t path_bytes = static_cast<size_t>(plen) * sizeof(ForwardNode);
+    if (len - off < path_bytes) {
+      return -1;
+    }
+    e.path.resize(plen);
+    for (uint8_t j = 0; j < plen; ++j) {
+      uint32_t hop_port = 0;
+      memcpy(&e.path[j].ip, buf + off, 4);
+      memcpy(&hop_port, buf + off + 4, 4);
+      e.path[j].port = ntohl(hop_port);
+      if (e.path[j].port == 0 || e.path[j].port > 65535) {
+        return -1;
+      }
+      off += sizeof(ForwardNode);
+    }
+    out_entries->push_back(e);
+  }
+
+  return (off == len) ? 0 : -1;
 }
 
 void MakeResponse(ForwardResponse *res, const ForwardRequest *req,

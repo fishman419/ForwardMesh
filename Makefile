@@ -7,6 +7,7 @@ BIN_DIR = bin
 
 OBJ_FWDD = $(BUILD_DIR)/fwdd.o $(BUILD_DIR)/util.o $(BUILD_DIR)/logger.o
 OBJ_FWD = $(BUILD_DIR)/fwd.o $(BUILD_DIR)/util.o $(BUILD_DIR)/logger.o
+OBJ_UNIT = $(BUILD_DIR)/test_mesh_unit.o $(BUILD_DIR)/mesh.o $(BUILD_DIR)/util.o $(BUILD_DIR)/logger.o
 TARGET = $(BIN_DIR)/fwdd $(BIN_DIR)/fwd
 
 all: $(TARGET)
@@ -23,7 +24,18 @@ $(BIN_DIR)/fwd: $(OBJ_FWD)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) -o $@ $^ $(CXXFLAGS)
 
-test: all
+$(BUILD_DIR)/test_mesh_unit.o: tests/test_mesh_unit.cc $(DEPS) src/mesh.h
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) -c -o $@ $< $(CXXFLAGS)
+
+$(BIN_DIR)/test_mesh_unit: $(OBJ_UNIT)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) -o $@ $^ $(CXXFLAGS)
+
+unit-test: $(BIN_DIR)/test_mesh_unit
+	./$(BIN_DIR)/test_mesh_unit
+
+test: all unit-test
 	./tests/test_basic.sh
 
 # AddressSanitizer build & test (runs in foreground -F mode)
@@ -71,4 +83,4 @@ leaks-check: $(LEAKS_BIN_DIR)/fwdd $(LEAKS_BIN_DIR)/fwd
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR) $(ASAN_BUILD_DIR) $(ASAN_BIN_DIR) $(LEAKS_BUILD_DIR) $(LEAKS_BIN_DIR)
 
-.PHONY: all test clean asan asan-test leaks-check
+.PHONY: all unit-test test clean asan asan-test leaks-check
