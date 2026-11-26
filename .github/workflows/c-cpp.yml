@@ -16,15 +16,22 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential g++
+        sudo apt-get install -y build-essential g++ python3
 
-    - name: Build
-      run: make
+    - name: Build and run C++ unit tests
+      run: |
+        make
+        make unit-test
 
-    - name: Run integration tests
+    - name: Run Protocol V2 integration tests
       run: |
         chmod +x tests/test_basic.sh
         ./tests/test_basic.sh
+
+    - name: Run Mesh auto-routing & failover tests
+      run: |
+        chmod +x tests/test_mesh.sh
+        ./tests/test_mesh.sh
 
     - name: Run AddressSanitizer tests
       run: |

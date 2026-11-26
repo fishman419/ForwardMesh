@@ -29,29 +29,39 @@ fi
 
 N1="$WORK_ROOT/n1"
 N2="$WORK_ROOT/n2"
-mkdir -p "$N1" "$N2"
+N3="$WORK_ROOT/n3"
+mkdir -p "$N1" "$N2" "$N3"
 printf "leak check payload\n" > "$WORK_ROOT/sample.txt"
+P_PORT1=$((BASE_PORT + 1))
+P_PORT2=$((BASE_PORT + 2))
+P_PORT3=$((BASE_PORT + 3))
 
-"$LEAKS_BIN_DIR/fwdd" -F -d "$N2" -p $((BASE_PORT + 2)) -t 4 -P "$N2/fwdd.pid" &
+"$LEAKS_BIN_DIR/fwdd" -F -d "$N3" -p "$P_PORT3" -t 4 -I 120 -P "$N3/fwdd.pid" &
+P3=$!
+PIDS+=("$P3")
+"$LEAKS_BIN_DIR/fwdd" -F -d "$N2" -p "$P_PORT2" -t 4 -I 120 -P "$N2/fwdd.pid" &
 P2=$!
 PIDS+=("$P2")
-"$LEAKS_BIN_DIR/fwdd" -F -d "$N1" -p $((BASE_PORT + 1)) -t 4 -P "$N1/fwdd.pid" &
+FWDD_DENY_PEERS="127.0.0.1:$P_PORT3" "$LEAKS_BIN_DIR/fwdd" -F -d "$N1" -p "$P_PORT1" -t 4 -I 120 -P "$N1/fwdd.pid" &
 P1=$!
 PIDS+=("$P1")
 
 for _ in $(seq 1 50); do
-    [ -s "$N1/fwdd.pid" ] && [ -s "$N2/fwdd.pid" ] && break
+    [ -s "$N1/fwdd.pid" ] && [ -s "$N2/fwdd.pid" ] && [ -s "$N3/fwdd.pid" ] && break
     sleep 0.05
 done
 
-echo "[Test 1] Exercising streaming, tee caching, pull, and error paths..."
-"$LEAKS_BIN_DIR/fwd" -a 127.0.0.1:$((BASE_PORT + 1)),127.0.0.1:$((BASE_PORT + 2)) -f "$WORK_ROOT/sample.txt"
-"$LEAKS_BIN_DIR/fwd" -s -a 127.0.0.1:$((BASE_PORT + 1)),127.0.0.1:$((BASE_PORT + 2)) -g sample.txt -f "$WORK_ROOT/pulled.txt"
+echo "[Test 1] Exercising Mesh learning, heartbeat sync, auto-completion, -R & -l..."
+"$LEAKS_BIN_DIR/fwd" -a "127.0.0.1:$P_PORT1,127.0.0.1:$P_PORT2,127.0.0.1:$P_PORT3" -f "$WORK_ROOT/sample.txt"
+sleep 0.3
+"$LEAKS_BIN_DIR/fwd" -a "127.0.0.1:$P_PORT1" -l > /dev/null
+"$LEAKS_BIN_DIR/fwd" -s -a "127.0.0.1:$P_PORT1,127.0.0.1:$P_PORT3" -g sample.txt -f "$WORK_ROOT/pulled.txt"
 cmp -s "$WORK_ROOT/sample.txt" "$WORK_ROOT/pulled.txt"
-"$LEAKS_BIN_DIR/fwd" -a 127.0.0.1:$((BASE_PORT + 1)),127.0.0.1:$((BASE_PORT + 2)) -g missing.txt -f "$WORK_ROOT/none.txt" > /dev/null 2>&1 || true
+"$LEAKS_BIN_DIR/fwd" -R -a "127.0.0.1:$P_PORT1,127.0.0.1:$P_PORT3" -f "$WORK_ROOT/sample.txt" > /dev/null 2>&1 || true
+"$LEAKS_BIN_DIR/fwd" -a "127.0.0.1:$P_PORT1,127.0.0.1:$P_PORT3" -g missing.txt -f "$WORK_ROOT/none.txt" > /dev/null 2>&1 || true
 
 echo "[Test 2] Inspecting live daemon processes with leaks(1)..."
-for pid in "$P1" "$P2"; do
+for pid in "$P1" "$P2" "$P3"; do
     set +e
     LEAK_OUT="$(leaks -q "$pid" 2>&1)"
     LEAK_RC=$?
@@ -67,7 +77,7 @@ for pid in "$P1" "$P2"; do
     fi
 done
 
-kill "$P1" "$P2"
-wait "$P1" "$P2"
+kill "$P1" "$P2" "$P3"
+wait "$P1" "$P2" "$P3"
 echo ""
 echo "=== Leak tests completed ==="
