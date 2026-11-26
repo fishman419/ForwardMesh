@@ -6,7 +6,7 @@ High-throughput file forwarding system that routes files through a chain of node
 
 [![ForwardMesh Architecture](docs/architecture.svg)](docs/architecture.svg)
 
-> Full editorial page (with data-plane & Protocol V2 summary cards): [docs/architecture.html](docs/architecture.html)
+> Full editorial page (with data-plane & Protocol V2 summary cards): [docs/architecture.html]([docs/architecture.html](https://fishman419.github.io/ForwardMesh/docs/architecture.html))
 
 ## Build & Test
 
