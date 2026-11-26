@@ -369,7 +369,9 @@ int ForwardNext(int fd, const ForwardRequest *req, const ForwardNode *nodes,
 
     if (RecvResponseHeader(next_fd, &res) != 0) {
       LOG_ERROR("recv downstream push response error");
-      retcode = (stream_err != ForwardSuccess) ? stream_err : ForwardInterrupt;
+      retcode = (stream_err != ForwardSuccess)
+                    ? stream_err
+                    : static_cast<uint8_t>(ForwardInterrupt);
       ret = -1;
     } else if (res.magic != kForwardMagic || res.version != kForwardVersion) {
       retcode = ForwardInternalError;
@@ -450,7 +452,7 @@ int PullForward(int fd, const ForwardRequest *req, const ForwardNode *nodes,
     uint8_t err =
         (pull_res.magic == kForwardMagic && pull_res.retcode != ForwardSuccess)
             ? pull_res.retcode
-            : ForwardInternalError;
+            : static_cast<uint8_t>(ForwardInternalError);
     if (err == ForwardUnreachable && !req_nodes.empty()) {
       g_mesh_router.RecordDownstreamUnreachable(chosen_plan.first_hop,
                                                 req_nodes.back());

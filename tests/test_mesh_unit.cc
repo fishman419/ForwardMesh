@@ -16,8 +16,11 @@
 namespace {
 ForwardNode MakeNode(const char *ip_str, uint32_t port) {
   ForwardNode n;
-  int rc = inet_pton(AF_INET, ip_str, &n.ip);
+  uint32_t ip = 0;
+  int rc = inet_pton(AF_INET, ip_str, &ip);
   assert(rc == 1);
+  (void)rc;
+  n.ip = ip;
   n.port = port;
   return n;
 }

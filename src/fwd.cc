@@ -355,7 +355,9 @@ int ResolveAddress(const char *raw_str, ForwardAddress *res) {
       LOG_ERROR("invalid node address: %s", addr.c_str());
       return -1;
     }
-    res->emplace_back(parsed.ip, parsed.port);
+    uint32_t node_ip = parsed.ip;
+    uint32_t node_port = parsed.port;
+    res->emplace_back(node_ip, node_port);
   }
 
   if (res->empty() || res->size() - 1 > kMaxForwardTTL) {
