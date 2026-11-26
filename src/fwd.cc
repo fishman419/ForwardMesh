@@ -32,8 +32,79 @@ uint64_t GenerateRequestId() {
   return (ts << 16) ^ static_cast<uint64_t>(getpid());
 }
 
+int QueryMeshRoutes(int fd, const ForwardNode &queried_node) {
+  ForwardRequest req;
+  memset(&req, 0, sizeof(req));
+  req.length = sizeof(ForwardRequest);
+  req.magic = kForwardMagic;
+  req.version = kForwardVersion;
+  req.cmd = ForwardMeshSync;
+  req.ttl = 0;
+  req.flags = 0;
+  req.id = GenerateRequestId();
+  req.crc32 = 0;
+
+  if (SendRequestHeader(fd, req) != 0) {
+    LOG_ERROR("send mesh sync query error");
+    return -1;
+  }
+
+  ForwardResponse res;
+  if (RecvResponseHeader(fd, &res) != 0) {
+    LOG_ERROR("recv mesh sync response error");
+    return -1;
+  }
+  if (res.magic != kForwardMagic || res.version != kForwardVersion ||
+      res.cmd != ForwardMeshSync || res.retcode != ForwardSuccess ||
+      res.length < sizeof(ForwardResponse) ||
+      (res.length - sizeof(ForwardResponse)) > 512 * 1024) {
+    LOG_ERROR("mesh sync query rejected, retcode=%u", res.retcode);
+    return -1;
+  }
+
+  size_t payload_len =
+      static_cast<size_t>(res.length - sizeof(ForwardResponse));
+  std::vector<uint8_t> payload(payload_len);
+  if (payload_len > 0 && RecvSync(fd, payload.data(), payload_len) != 0) {
+    LOG_ERROR("recv mesh sync payload error");
+    return -1;
+  }
+
+  uint32_t actual_crc = Crc32Update(0, payload.data(), payload.size());
+  if (actual_crc != res.crc32) {
+    LOG_ERROR("mesh sync payload crc32 mismatch");
+    return -1;
+  }
+
+  std::vector<MeshSyncEntry> entries;
+  if (DecodeMeshSyncPayload(payload.data(), payload.size(), &entries) != 0) {
+    LOG_ERROR("decode mesh sync payload error");
+    return -1;
+  }
+
+  printf("Mesh Routing Table @ %s (%zu entries)\n",
+         FormatNodeAddr(queried_node).c_str(), entries.size());
+  if (entries.empty()) {
+    printf("  (no routes learned)\n");
+    return 0;
+  }
+
+  printf("%-22s %-8s %-6s %-8s %s\n", "TARGET", "STATUS", "HOPS", "RTT_MS",
+         "PATH");
+  for (const auto &e : entries) {
+    std::string path_str;
+    for (size_t i = 0; i < e.path.size(); ++i) {
+      if (i > 0) path_str += " -> ";
+      path_str += FormatNodeAddr(e.path[i]);
+    }
+    printf("%-22s %-8s %-6zu %-8u %s\n", FormatNodeAddr(e.target).c_str(),
+           e.alive ? "UP" : "DOWN", e.path.size(), e.rtt_ms, path_str.c_str());
+  }
+  return 0;
+}
+
 int SendFile(int fd, const char *fpath, const ForwardAddress &address,
-             uint8_t flags) {
+             uint8_t base_flags) {
   int r_fd = -1;
   int ret = 0;
   struct stat s;
@@ -80,7 +151,7 @@ int SendFile(int fd, const char *fpath, const ForwardAddress &address,
   req.version = kForwardVersion;
   req.cmd = ForwardPush;
   req.ttl = static_cast<uint8_t>(ttl);
-  req.flags = flags;
+  req.flags = MakePacketFlags(base_flags, 0);
   req.id = GenerateRequestId();
   req.crc32 = file_crc32;
 
@@ -127,7 +198,7 @@ int SendFile(int fd, const char *fpath, const ForwardAddress &address,
 }
 
 int PullFile(int fd, const char *remote_path, const char *local_path,
-             const ForwardAddress &address, uint8_t flags) {
+             const ForwardAddress &address, uint8_t base_flags) {
   size_t remote_fname_len = strlen(remote_path);
   if (!IsSafeRelativePath(remote_path) ||
       remote_fname_len + 1 > kMaxFilenameLen) {
@@ -147,7 +218,7 @@ int PullFile(int fd, const char *remote_path, const char *local_path,
   req.version = kForwardVersion;
   req.cmd = ForwardPull;
   req.ttl = static_cast<uint8_t>(ttl);
-  req.flags = flags;
+  req.flags = MakePacketFlags(base_flags, 0);
   req.id = GenerateRequestId();
   req.crc32 = 0;
 
@@ -279,28 +350,12 @@ int ResolveAddress(const char *raw_str, ForwardAddress *res) {
       pos = next + 1;
     }
 
-    int port = static_cast<int>(kDefaultPort);
-    size_t port_pos = addr.find(':');
-    std::string ip_part = addr;
-    if (port_pos != std::string::npos) {
-      ip_part = addr.substr(0, port_pos);
-      std::string port_part = addr.substr(port_pos + 1);
-      char *endptr = NULL;
-      long parsed_port = strtol(port_part.c_str(), &endptr, 10);
-      if (port_part.empty() || *endptr != '\0' || parsed_port <= 0 ||
-          parsed_port > 65535) {
-        LOG_ERROR("port is invalid in address: %s", addr.c_str());
-        return -1;
-      }
-      port = static_cast<int>(parsed_port);
-    }
-
-    uint32_t ip = 0;
-    if (inet_pton(AF_INET, ip_part.c_str(), &ip) != 1) {
-      LOG_ERROR("ip address is invalid: %s", ip_part.c_str());
+    ForwardNode parsed;
+    if (!ParseNodeAddr(addr, &parsed)) {
+      LOG_ERROR("invalid node address: %s", addr.c_str());
       return -1;
     }
-    res->emplace_back(ip, static_cast<uint32_t>(port));
+    res->emplace_back(parsed.ip, parsed.port);
   }
 
   if (res->empty() || res->size() - 1 > kMaxForwardTTL) {
@@ -316,18 +371,14 @@ void PrintUsage(const char *prog) {
   printf("  -a addr : comma-separated list of ip:port forwarding chain\n");
   printf("  -f file : file to send (push) or local output path (pull)\n");
   printf("  -g file : remote relative file path to get (pull mode)\n");
+  printf("  -s      : cache file copies on intermediate hops\n");
   printf(
-      "  -s      : cache file copies on intermediate hops (default: zero-disk "
-      "streaming)\n");
+      "  -R      : strict source routing (disable Mesh route completion & "
+      "failover)\n");
+  printf(
+      "  -l      : query and display Mesh routing table of the first node "
+      "in -a\n");
   printf("  -h      : show this help\n");
-  printf("Examples:\n");
-  printf("  Push (stream): %s -a 127.0.0.1:40000,127.0.0.1:40001 -f test.txt\n",
-         prog);
-  printf(
-      "  Push (cache) : %s -s -a 127.0.0.1:40000,127.0.0.1:40001 -f test.txt\n",
-      prog);
-  printf("  Pull         : %s -a 127.0.0.1:40000 -g remote.txt -f local.txt\n",
-         prog);
 }
 }  // namespace
 
@@ -344,10 +395,11 @@ int main(int argc, char *argv[]) {
   std::string fpath;
   std::string remote_path;
   bool pull_mode = false;
-  uint8_t flags = kFlagNone;
+  bool list_mode = false;
+  uint8_t base_flags = kFlagNone;
 
   LOG_INFO("Forward client started");
-  while ((opt = getopt(argc, argv, "a:f:g:sh")) != -1) {
+  while ((opt = getopt(argc, argv, "a:f:g:sRlh")) != -1) {
     switch (opt) {
       case 'a':
         forward_address.clear();
@@ -364,7 +416,13 @@ int main(int argc, char *argv[]) {
         remote_path = optarg;
         break;
       case 's':
-        flags |= kFlagStoreOnHop;
+        base_flags |= kFlagStoreOnHop;
+        break;
+      case 'R':
+        base_flags |= kFlagStrictRoute;
+        break;
+      case 'l':
+        list_mode = true;
         break;
       case 'h':
         PrintUsage(argv[0]);
@@ -380,12 +438,12 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  if (!pull_mode && fpath.empty()) {
-    LOG_ERROR("please specify file with -f (push) or -g (pull)");
+  if (!list_mode && !pull_mode && fpath.empty()) {
+    LOG_ERROR("please specify -f (push), -g (pull), or -l (list routes)");
     return 1;
   }
 
-  if (!pull_mode) {
+  if (!list_mode && !pull_mode) {
     struct stat s;
     if (stat(fpath.c_str(), &s) != 0) {
       LOG_ERROR("stat error, fpath %s, %d", fpath.c_str(), errno);
@@ -398,36 +456,29 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+  int sockfd =
+      ConnectWithTimeout(forward_address[0].first, forward_address[0].second,
+                         kStrictConnectTimeoutMs, NULL);
   if (sockfd < 0) {
-    LOG_ERROR("socket error, %d", errno);
-    return 1;
-  }
-  SetSocketTimeout(sockfd, kDefaultSocketTimeoutSec);
-
-  struct sockaddr_in dst_addr;
-  memset(&dst_addr, 0, sizeof(dst_addr));
-  dst_addr.sin_family = AF_INET;
-  dst_addr.sin_port = htons(static_cast<uint16_t>(forward_address[0].second));
-  dst_addr.sin_addr.s_addr = forward_address[0].first;
-
-  if (connect(sockfd, reinterpret_cast<struct sockaddr *>(&dst_addr),
-              sizeof(dst_addr)) < 0) {
-    LOG_ERROR("connect error, %d", errno);
-    close(sockfd);
+    LOG_ERROR("connect error to entry node");
     return 1;
   }
 
   int rc = 0;
-  if (pull_mode) {
+  if (list_mode) {
+    ForwardNode entry{forward_address[0].first, forward_address[0].second};
+    if (QueryMeshRoutes(sockfd, entry) != 0) {
+      rc = 1;
+    }
+  } else if (pull_mode) {
     const char *out_path = fpath.empty() ? "./downloaded_file" : fpath.c_str();
     if (PullFile(sockfd, remote_path.c_str(), out_path, forward_address,
-                 flags) != 0) {
+                 base_flags) != 0) {
       LOG_ERROR("pull file error");
       rc = 1;
     }
   } else {
-    if (SendFile(sockfd, fpath.c_str(), forward_address, flags) != 0) {
+    if (SendFile(sockfd, fpath.c_str(), forward_address, base_flags) != 0) {
       LOG_ERROR("forward file error");
       rc = 1;
     }

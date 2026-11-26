@@ -13,6 +13,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
@@ -21,45 +23,200 @@
 #include <vector>
 
 #include "logger.h"
+#include "mesh.h"
 #include "protocol.h"
 #include "util.h"
 
 namespace {
+const size_t kMaxElasticWorkers = 64;
+const uint64_t kMaxSyncPayloadBytes = 512 * 1024;
+
 std::queue<int> g_task_queue;
 std::mutex g_queue_mutex;
 std::condition_variable g_queue_cv;
+size_t g_idle_workers = 0;
 bool g_shutdown = false;
 bool g_always_store_on_hop = false;
 volatile sig_atomic_t g_stop_requested = 0;
 
+MeshRouter g_mesh_router;
+std::mutex g_hb_mutex;
+std::condition_variable g_hb_cv;
+bool g_hb_stop = false;
+
 void SignalHandler(int /*signo*/) { g_stop_requested = 1; }
 
-int ConnectNextNode(const ForwardNode &node) {
-  int next_fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (next_fd < 0) {
-    LOG_ERROR("socket error, %d", errno);
-    return -1;
-  }
-  SetSocketTimeout(next_fd, kDefaultSocketTimeoutSec);
-
-  struct sockaddr_in dst_addr;
-  memset(&dst_addr, 0, sizeof(dst_addr));
-  dst_addr.sin_family = AF_INET;
-  dst_addr.sin_port = htons(static_cast<uint16_t>(node.port));
-  dst_addr.sin_addr.s_addr = node.ip;
-
-  if (connect(next_fd, reinterpret_cast<struct sockaddr *>(&dst_addr),
-              sizeof(dst_addr)) < 0) {
-    LOG_ERROR("connect error, %d", errno);
-    close(next_fd);
-    return -2;
-  }
-  return next_fd;
+bool SameNode(const ForwardNode &a, const ForwardNode &b) {
+  return a.ip == b.ip && a.port == b.port;
 }
 
-// Relays data_len bytes from src_fd to dst_fd in cut-through streaming fashion.
-// When store_copy is true, tees the stream into a temporary file in a single
-// pass and atomically renames it onto the local basename only if CRC32 matches.
+void DrainSmallPayload(int fd, uint64_t len) {
+  if (len == 0 || len > kForwardBufSize) {
+    return;
+  }
+  std::vector<char> discard(static_cast<size_t>(len));
+  RecvSync(fd, discard.data(), discard.size());
+}
+
+bool SyncNeighborOnce(const ForwardNode &peer) {
+  uint16_t rtt_ms = 1;
+  int fd =
+      ConnectWithTimeout(peer.ip, peer.port, kProbeConnectTimeoutMs, &rtt_ms);
+  if (fd < 0) {
+    g_mesh_router.RecordConnectFailure(peer);
+    return false;
+  }
+  g_mesh_router.RegisterSelfFromSocket(fd);
+
+  ForwardRequest req;
+  memset(&req, 0, sizeof(req));
+  req.length = sizeof(ForwardRequest);
+  req.magic = kForwardMagic;
+  req.version = kForwardVersion;
+  req.cmd = ForwardMeshSync;
+  req.ttl = 0;
+  req.flags = 0;
+  req.id = 0;
+  req.crc32 = 0;
+
+  if (SendRequestHeader(fd, req) != 0) {
+    close(fd);
+    g_mesh_router.RecordConnectFailure(peer);
+    return false;
+  }
+
+  ForwardResponse res;
+  if (RecvResponseHeader(fd, &res) != 0 || res.magic != kForwardMagic ||
+      res.version != kForwardVersion || res.cmd != ForwardMeshSync ||
+      res.retcode != ForwardSuccess || res.length < sizeof(ForwardResponse) ||
+      (res.length - sizeof(ForwardResponse)) > kMaxSyncPayloadBytes) {
+    close(fd);
+    return false;
+  }
+
+  size_t payload_len =
+      static_cast<size_t>(res.length - sizeof(ForwardResponse));
+  std::vector<uint8_t> payload(payload_len);
+  if (payload_len > 0 && RecvSync(fd, payload.data(), payload_len) != 0) {
+    close(fd);
+    return false;
+  }
+  close(fd);
+
+  uint32_t actual_crc = Crc32Update(0, payload.data(), payload.size());
+  if (actual_crc != res.crc32) {
+    LOG_WARNING("[MESH]sync payload crc32 mismatch from %s",
+                FormatNodeAddr(peer).c_str());
+    return false;
+  }
+
+  std::vector<MeshSyncEntry> entries;
+  if (DecodeMeshSyncPayload(payload.data(), payload.size(), &entries) != 0) {
+    LOG_WARNING("[MESH]invalid sync payload from %s",
+                FormatNodeAddr(peer).c_str());
+    return false;
+  }
+
+  g_mesh_router.ApplyNeighborSync(peer, rtt_ms, entries);
+  return true;
+}
+
+void SyncAllNeighborsOnce() {
+  std::vector<ForwardNode> peers = g_mesh_router.GetDirectNeighbors();
+  for (const auto &peer : peers) {
+    if (g_stop_requested) {
+      break;
+    }
+    SyncNeighborOnce(peer);
+  }
+}
+
+void MeshHeartbeatThread(uint32_t interval_ms) {
+  SyncAllNeighborsOnce();
+  std::unique_lock<std::mutex> lock(g_hb_mutex);
+  while (!g_hb_stop && !g_stop_requested) {
+    g_hb_cv.wait_for(lock, std::chrono::milliseconds(interval_ms),
+                     [] { return g_hb_stop || g_stop_requested != 0; });
+    if (g_hb_stop || g_stop_requested) {
+      break;
+    }
+    lock.unlock();
+    SyncAllNeighborsOnce();
+    lock.lock();
+  }
+}
+
+int HandleMeshSync(int fd, const ForwardRequest *req) {
+  ForwardResponse res;
+  std::vector<MeshSyncEntry> snap = g_mesh_router.ExportSyncSnapshot();
+  std::vector<uint8_t> payload;
+  EncodeMeshSyncPayload(snap, &payload);
+  uint32_t crc = Crc32Update(0, payload.data(), payload.size());
+
+  MakeResponse(&res, req, ForwardSuccess);
+  res.length = sizeof(ForwardResponse) + payload.size();
+  res.crc32 = crc;
+
+  if (SendResponseHeader(fd, res) != 0 ||
+      (!payload.empty() && SendSync(fd, payload.data(), payload.size()) != 0)) {
+    LOG_ERROR("[MESH]send sync response error");
+    return -1;
+  }
+  return 0;
+}
+
+int EstablishNextHop(const ForwardRequest *req,
+                     const std::vector<ForwardNode> &req_nodes,
+                     HopPlan *out_plan, uint16_t *out_rtt_ms) {
+  bool strict_mode = (req->flags & kFlagStrictRoute) != 0;
+  uint8_t hops_traversed = GetHopsTraversed(req->flags);
+  int timeout_ms =
+      strict_mode ? kStrictConnectTimeoutMs : kDefaultConnectTimeoutMs;
+  bool should_sync_on_miss = false;
+
+  std::vector<HopPlan> plans = g_mesh_router.BuildHopPlans(
+      req_nodes, hops_traversed, strict_mode, &should_sync_on_miss);
+
+  for (const auto &p : plans) {
+    uint16_t rtt = 1;
+    int next_fd =
+        ConnectWithTimeout(p.first_hop.ip, p.first_hop.port, timeout_ms, &rtt);
+    if (next_fd >= 0) {
+      g_mesh_router.RegisterSelfFromSocket(next_fd);
+      *out_plan = p;
+      *out_rtt_ms = rtt;
+      return next_fd;
+    }
+    g_mesh_router.RecordConnectFailure(p.first_hop);
+  }
+
+  if (!strict_mode && should_sync_on_miss && !req_nodes.empty()) {
+    LOG_DEBUG("[MESH]cache miss for %s, triggering on-demand neighbor sync",
+              FormatNodeAddr(req_nodes[0]).c_str());
+    SyncAllNeighborsOnce();
+    std::vector<HopPlan> retry_plans =
+        g_mesh_router.BuildHopPlans(req_nodes, hops_traversed, false, NULL);
+    for (const auto &p : retry_plans) {
+      if (SameNode(p.first_hop, req_nodes[0]) &&
+          p.remaining_tail.size() + 1 == req_nodes.size()) {
+        continue;
+      }
+      uint16_t rtt = 1;
+      int next_fd = ConnectWithTimeout(p.first_hop.ip, p.first_hop.port,
+                                       timeout_ms, &rtt);
+      if (next_fd >= 0) {
+        g_mesh_router.RegisterSelfFromSocket(next_fd);
+        *out_plan = p;
+        *out_rtt_ms = rtt;
+        return next_fd;
+      }
+      g_mesh_router.RecordConnectFailure(p.first_hop);
+    }
+  }
+
+  return -2;
+}
+
 int StreamOrTeeForward(int src_fd, int dst_fd, const ForwardFile *fmeta,
                        uint64_t data_len, uint32_t expected_crc32,
                        bool store_copy, uint8_t *out_err) {
@@ -146,20 +303,29 @@ int ForwardNext(int fd, const ForwardRequest *req, const ForwardNode *nodes,
   }
   uint64_t data_len = req->length - header_overhead;
 
-  int next_fd = ConnectNextNode(nodes[0]);
+  std::vector<ForwardNode> req_nodes(nodes, nodes + req->ttl);
+  HopPlan chosen_plan;
+  uint16_t connect_rtt_ms = 1;
+  int next_fd = EstablishNextHop(req, req_nodes, &chosen_plan, &connect_rtt_ms);
   if (next_fd < 0) {
+    DrainSmallPayload(fd, data_len);
     retcode = (next_fd == -2) ? ForwardUnreachable : ForwardInternalError;
     ret = -1;
     goto out_response;
   }
 
   {
+    uint8_t new_ttl = static_cast<uint8_t>(chosen_plan.remaining_tail.size());
+    uint8_t next_hops = static_cast<uint8_t>(GetHopsTraversed(req->flags) + 1);
     ForwardRequest next_req = *req;
-    next_req.length -= sizeof(ForwardNode);
-    next_req.ttl -= 1;
+    next_req.ttl = new_ttl;
+    next_req.flags = MakePacketFlags(req->flags, next_hops);
+    next_req.length = sizeof(ForwardRequest) +
+                      static_cast<uint64_t>(new_ttl) * sizeof(ForwardNode) +
+                      sizeof(ForwardFile) + fmeta->length + data_len;
 
     if (SendRequestHeader(next_fd, next_req) != 0 ||
-        SendNodes(next_fd, nodes + 1, next_req.ttl) != 0 ||
+        SendNodes(next_fd, chosen_plan.remaining_tail.data(), new_ttl) != 0 ||
         SendFileMeta(next_fd, reinterpret_cast<const char *>(fmeta->filename),
                      fmeta->length) != 0) {
       LOG_ERROR("send push header/meta to next hop error");
@@ -176,8 +342,6 @@ int ForwardNext(int fd, const ForwardRequest *req, const ForwardNode *nodes,
     int sret = StreamOrTeeForward(fd, next_fd, fmeta, data_len, req->crc32,
                                   store_copy, &stream_err);
 
-    // If relay completed on the wire (even with CRC mismatch), read downstream
-    // response; if wire relay broke mid-stream, bail immediately.
     if (sret != 0 && stream_err == ForwardInterrupt) {
       retcode = ForwardInterrupt;
       ret = -1;
@@ -193,7 +357,15 @@ int ForwardNext(int fd, const ForwardRequest *req, const ForwardNode *nodes,
       ret = -1;
     } else {
       retcode = (res.retcode != ForwardSuccess) ? res.retcode : stream_err;
-      if (retcode != ForwardSuccess) {
+      if (retcode == ForwardSuccess) {
+        g_mesh_router.RecordTransferSuccess(
+            chosen_plan.first_hop, connect_rtt_ms, chosen_plan.remaining_tail,
+            (req->flags & kFlagStrictRoute) != 0);
+      } else {
+        if (retcode == ForwardUnreachable && !req_nodes.empty()) {
+          g_mesh_router.RecordDownstreamUnreachable(chosen_plan.first_hop,
+                                                    req_nodes.back());
+        }
         ret = -1;
       }
     }
@@ -214,7 +386,10 @@ out_response:
 int PullForward(int fd, const ForwardRequest *req, const ForwardNode *nodes,
                 const ForwardFile *fmeta) {
   ForwardResponse res;
-  int next_fd = ConnectNextNode(nodes[0]);
+  std::vector<ForwardNode> req_nodes(nodes, nodes + req->ttl);
+  HopPlan chosen_plan;
+  uint16_t connect_rtt_ms = 1;
+  int next_fd = EstablishNextHop(req, req_nodes, &chosen_plan, &connect_rtt_ms);
   if (next_fd < 0) {
     uint8_t err = (next_fd == -2) ? ForwardUnreachable : ForwardInternalError;
     MakeResponse(&res, req, err);
@@ -222,12 +397,17 @@ int PullForward(int fd, const ForwardRequest *req, const ForwardNode *nodes,
     return -1;
   }
 
+  uint8_t new_ttl = static_cast<uint8_t>(chosen_plan.remaining_tail.size());
+  uint8_t next_hops = static_cast<uint8_t>(GetHopsTraversed(req->flags) + 1);
   ForwardRequest next_req = *req;
-  next_req.length -= sizeof(ForwardNode);
-  next_req.ttl -= 1;
+  next_req.ttl = new_ttl;
+  next_req.flags = MakePacketFlags(req->flags, next_hops);
+  next_req.length = sizeof(ForwardRequest) +
+                    static_cast<uint64_t>(new_ttl) * sizeof(ForwardNode) +
+                    sizeof(ForwardFile) + fmeta->length;
 
   if (SendRequestHeader(next_fd, next_req) != 0 ||
-      SendNodes(next_fd, nodes + 1, next_req.ttl) != 0 ||
+      SendNodes(next_fd, chosen_plan.remaining_tail.data(), new_ttl) != 0 ||
       SendFileMeta(next_fd, reinterpret_cast<const char *>(fmeta->filename),
                    fmeta->length) != 0) {
     LOG_ERROR("send pull request to next node failed");
@@ -252,6 +432,10 @@ int PullForward(int fd, const ForwardRequest *req, const ForwardNode *nodes,
         (pull_res.magic == kForwardMagic && pull_res.retcode != ForwardSuccess)
             ? pull_res.retcode
             : ForwardInternalError;
+    if (err == ForwardUnreachable && !req_nodes.empty()) {
+      g_mesh_router.RecordDownstreamUnreachable(chosen_plan.first_hop,
+                                                req_nodes.back());
+    }
     MakeResponse(&res, req, err);
     SendResponseHeader(fd, res);
     close(next_fd);
@@ -278,7 +462,6 @@ int PullForward(int fd, const ForwardRequest *req, const ForwardNode *nodes,
     return -1;
   }
 
-  // Forward pull data header + file metadata upstream before streaming payload.
   if (SendResponseHeader(fd, pull_res) != 0 ||
       SendFileMeta(fd, reinterpret_cast<const char *>(pull_fmeta_buf->filename),
                    pull_fmeta_buf->length) != 0) {
@@ -316,6 +499,12 @@ int PullForward(int fd, const ForwardRequest *req, const ForwardNode *nodes,
   }
 
   close(next_fd);
+  if (final_code == ForwardSuccess) {
+    g_mesh_router.RecordTransferSuccess(chosen_plan.first_hop, connect_rtt_ms,
+                                        chosen_plan.remaining_tail,
+                                        (req->flags & kFlagStrictRoute) != 0);
+  }
+
   MakeResponse(&res, req, final_code);
   if (SendResponseHeader(fd, res) != 0) {
     LOG_ERROR("send final pull response error");
@@ -468,6 +657,7 @@ int PullFileToClient(int fd, const ForwardRequest *req,
 
 void HandleConnection(int fd) {
   SetSocketTimeout(fd, kDefaultSocketTimeoutSec);
+  g_mesh_router.RegisterSelfFromSocket(fd);
 
   ForwardRequest req;
   ForwardResponse res;
@@ -482,18 +672,32 @@ void HandleConnection(int fd) {
 
   LOG_DEBUG(
       "[header]len=%llu magic=0x%x ver=%u cmd=%u ttl=%u flags=0x%x "
-      "id=0x%llx crc32=0x%08x",
+      "hops=%u id=0x%llx crc32=0x%08x",
       static_cast<unsigned long long>(req.length), req.magic, req.version,
-      req.cmd, req.ttl, req.flags, static_cast<unsigned long long>(req.id),
-      req.crc32);
+      req.cmd, req.ttl, req.flags, GetHopsTraversed(req.flags),
+      static_cast<unsigned long long>(req.id), req.crc32);
 
   if (req.magic != kForwardMagic || req.version != kForwardVersion ||
-      (req.cmd != ForwardPull && req.cmd != ForwardPush) ||
-      req.ttl > kMaxForwardTTL) {
+      (req.cmd != ForwardPull && req.cmd != ForwardPush &&
+       req.cmd != ForwardMeshSync) ||
+      req.ttl > kMaxForwardTTL ||
+      GetHopsTraversed(req.flags) > kMaxForwardTTL) {
     LOG_ERROR("invalid request header: magic=0x%x version=%u cmd=%u ttl=%u",
               req.magic, req.version, req.cmd, req.ttl);
     MakeResponse(&res, &req, ForwardInvalidRequest);
     SendResponseHeader(fd, res);
+    close(fd);
+    return;
+  }
+
+  if (req.cmd == ForwardMeshSync) {
+    if (req.ttl != 0 || req.length != sizeof(ForwardRequest)) {
+      MakeResponse(&res, &req, ForwardInvalidRequest);
+      SendResponseHeader(fd, res);
+      close(fd);
+      return;
+    }
+    HandleMeshSync(fd, &req);
     close(fd);
     return;
   }
@@ -525,9 +729,6 @@ void HandleConnection(int fd) {
       free(fnodes);
       close(fd);
       return;
-    }
-    for (uint32_t i = 0; i < req.ttl; ++i) {
-      LOG_DEBUG("[node%u]ip %u, port %u", i, fnodes[i].ip, fnodes[i].port);
     }
   }
 
@@ -594,7 +795,9 @@ void WorkerThread() {
     int fd = -1;
     {
       std::unique_lock<std::mutex> lock(g_queue_mutex);
+      g_idle_workers += 1;
       g_queue_cv.wait(lock, [] { return !g_task_queue.empty() || g_shutdown; });
+      g_idle_workers -= 1;
       if (g_shutdown && g_task_queue.empty()) {
         return;
       }
@@ -637,14 +840,23 @@ int CreateListenSocket(int port) {
   return sockfd;
 }
 
-int ForwardLoop(int sockfd, int num_threads) {
+int ForwardLoop(int sockfd, int num_threads, uint32_t heartbeat_ms) {
   std::vector<std::thread> workers;
-  workers.reserve(num_threads);
+  size_t max_workers =
+      std::max<size_t>(static_cast<size_t>(num_threads), kMaxElasticWorkers);
+  workers.reserve(max_workers);
   for (int i = 0; i < num_threads; ++i) {
     workers.emplace_back(WorkerThread);
   }
 
-  LOG_INFO("Forward daemon listening with %d worker threads", num_threads);
+  std::thread hb_thread;
+  if (heartbeat_ms > 0) {
+    hb_thread = std::thread(MeshHeartbeatThread, heartbeat_ms);
+  }
+
+  LOG_INFO(
+      "Forward daemon listening with %d base worker threads (heartbeat=%ums)",
+      num_threads, heartbeat_ms);
 
   struct pollfd pfd;
   pfd.fd = sockfd;
@@ -683,12 +895,24 @@ int ForwardLoop(int sockfd, int num_threads) {
     {
       std::lock_guard<std::mutex> lock(g_queue_mutex);
       g_task_queue.push(fd);
+      if (g_idle_workers == 0 && workers.size() < max_workers) {
+        workers.emplace_back(WorkerThread);
+      }
     }
     g_queue_cv.notify_one();
   }
 
   LOG_INFO("Shutting down forward daemon...");
   close(sockfd);
+  {
+    std::lock_guard<std::mutex> hb_lock(g_hb_mutex);
+    g_hb_stop = true;
+  }
+  g_hb_cv.notify_all();
+  if (hb_thread.joinable()) {
+    hb_thread.join();
+  }
+
   {
     std::lock_guard<std::mutex> lock(g_queue_mutex);
     g_shutdown = true;
@@ -697,21 +921,28 @@ int ForwardLoop(int sockfd, int num_threads) {
   for (auto &t : workers) {
     t.join();
   }
+  g_mesh_router.SaveToFile();
   LOG_INFO("Forward daemon stopped cleanly");
   return 0;
 }
 
 void PrintUsage(const char *prog) {
   printf(
-      "Usage: %s [-p port] [-d dir] [-t threads] [-P pidfile] [-F] [-S] [-h]\n",
+      "Usage: %s [-p port] [-d dir] [-t threads] [-P pidfile] [-F] [-S] "
+      "[-I heartbeat_ms] [-h]\n",
       prog);
-  printf("  -p port     : specify port (default %u)\n", kDefaultPort);
-  printf("  -d dir      : specify working directory (default .)\n");
-  printf("  -t threads  : number of worker threads (default 4)\n");
-  printf("  -P pidfile  : write process PID to pidfile\n");
-  printf("  -F          : run in foreground (do not daemonize)\n");
-  printf("  -S          : always cache relayed files on intermediate hops\n");
-  printf("  -h          : show this help\n");
+  printf("  -p port         : specify port (default %u)\n", kDefaultPort);
+  printf("  -d dir          : specify working directory (default .)\n");
+  printf("  -t threads      : number of worker threads (default 4)\n");
+  printf("  -P pidfile      : write process PID to pidfile\n");
+  printf("  -F              : run in foreground (do not daemonize)\n");
+  printf(
+      "  -S              : always cache relayed files on intermediate hops\n");
+  printf(
+      "  -I heartbeat_ms : neighbor probe & route sync interval in ms "
+      "(default %u, 0 to disable)\n",
+      kDefaultHeartbeatMs);
+  printf("  -h              : show this help\n");
 }
 
 bool WritePidFile(const std::string &pidfile) {
@@ -732,9 +963,10 @@ int main(int argc, char *argv[]) {
   std::string dir = ".";
   std::string pidfile;
   int num_threads = 4;
+  uint32_t heartbeat_ms = kDefaultHeartbeatMs;
   bool foreground = false;
 
-  while ((opt = getopt(argc, argv, "p:d:t:P:FSh")) != -1) {
+  while ((opt = getopt(argc, argv, "p:d:t:P:I:FSh")) != -1) {
     switch (opt) {
       case 'p':
         port = atoi(optarg);
@@ -756,6 +988,17 @@ int main(int argc, char *argv[]) {
       case 'P':
         pidfile = optarg;
         break;
+      case 'I': {
+        char *endptr = NULL;
+        long parsed_hb = strtol(optarg, &endptr, 10);
+        if (optarg[0] == '\0' || *endptr != '\0' || parsed_hb < 0 ||
+            parsed_hb > 3600000) {
+          fprintf(stderr, "Invalid heartbeat interval ms: %s\n", optarg);
+          return 1;
+        }
+        heartbeat_ms = static_cast<uint32_t>(parsed_hb);
+        break;
+      }
       case 'F':
         foreground = true;
         break;
@@ -858,6 +1101,10 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+  g_mesh_router.Init(static_cast<uint32_t>(port), dir + "/mesh_routes.dat",
+                     heartbeat_ms);
+  g_mesh_router.LoadFromFile();
+
   if (!pidfile.empty() && !WritePidFile(pidfile)) {
     close(listen_fd);
     return 1;
@@ -865,11 +1112,11 @@ int main(int argc, char *argv[]) {
 
   LOG_INFO(
       "Forward daemon started (pid=%d, port=%d, dir=%s, foreground=%d, "
-      "store_on_hop=%d)",
+      "store_on_hop=%d, heartbeat_ms=%u)",
       static_cast<int>(getpid()), port, dir.c_str(), foreground ? 1 : 0,
-      g_always_store_on_hop ? 1 : 0);
+      g_always_store_on_hop ? 1 : 0, heartbeat_ms);
 
-  int rc = ForwardLoop(listen_fd, num_threads);
+  int rc = ForwardLoop(listen_fd, num_threads, heartbeat_ms);
   if (!pidfile.empty()) {
     unlink(pidfile.c_str());
   }

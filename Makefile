@@ -1,11 +1,11 @@
 CXX ?= g++
 CXXFLAGS = -std=c++11 -Wall -Wextra -pthread -O2 -I./src
-DEPS = src/protocol.h src/util.h src/logger.h
+DEPS = src/protocol.h src/util.h src/logger.h src/mesh.h
 
 BUILD_DIR = build
 BIN_DIR = bin
 
-OBJ_FWDD = $(BUILD_DIR)/fwdd.o $(BUILD_DIR)/util.o $(BUILD_DIR)/logger.o
+OBJ_FWDD = $(BUILD_DIR)/fwdd.o $(BUILD_DIR)/mesh.o $(BUILD_DIR)/util.o $(BUILD_DIR)/logger.o
 OBJ_FWD = $(BUILD_DIR)/fwd.o $(BUILD_DIR)/util.o $(BUILD_DIR)/logger.o
 OBJ_UNIT = $(BUILD_DIR)/test_mesh_unit.o $(BUILD_DIR)/mesh.o $(BUILD_DIR)/util.o $(BUILD_DIR)/logger.o
 TARGET = $(BIN_DIR)/fwdd $(BIN_DIR)/fwd
@@ -24,7 +24,7 @@ $(BIN_DIR)/fwd: $(OBJ_FWD)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) -o $@ $^ $(CXXFLAGS)
 
-$(BUILD_DIR)/test_mesh_unit.o: tests/test_mesh_unit.cc $(DEPS) src/mesh.h
+$(BUILD_DIR)/test_mesh_unit.o: tests/test_mesh_unit.cc $(DEPS)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) -c -o $@ $< $(CXXFLAGS)
 
@@ -37,6 +37,7 @@ unit-test: $(BIN_DIR)/test_mesh_unit
 
 test: all unit-test
 	./tests/test_basic.sh
+	./tests/test_mesh.sh
 
 # AddressSanitizer build & test (runs in foreground -F mode)
 ASAN_CXXFLAGS = -std=c++11 -Wall -Wextra -pthread -I./src -fsanitize=address -g -O1 -fno-omit-frame-pointer
@@ -47,7 +48,7 @@ $(ASAN_BUILD_DIR)/%.o: src/%.cc $(DEPS)
 	@mkdir -p $(ASAN_BUILD_DIR)
 	$(CXX) -c -o $@ $< $(ASAN_CXXFLAGS)
 
-$(ASAN_BIN_DIR)/fwdd: $(ASAN_BUILD_DIR)/fwdd.o $(ASAN_BUILD_DIR)/util.o $(ASAN_BUILD_DIR)/logger.o
+$(ASAN_BIN_DIR)/fwdd: $(ASAN_BUILD_DIR)/fwdd.o $(ASAN_BUILD_DIR)/mesh.o $(ASAN_BUILD_DIR)/util.o $(ASAN_BUILD_DIR)/logger.o
 	@mkdir -p $(ASAN_BIN_DIR)
 	$(CXX) -o $@ $^ $(ASAN_CXXFLAGS)
 
@@ -69,7 +70,7 @@ $(LEAKS_BUILD_DIR)/%.o: src/%.cc $(DEPS)
 	@mkdir -p $(LEAKS_BUILD_DIR)
 	$(CXX) -c -o $@ $< $(LEAKS_CXXFLAGS)
 
-$(LEAKS_BIN_DIR)/fwdd: $(LEAKS_BUILD_DIR)/fwdd.o $(LEAKS_BUILD_DIR)/util.o $(LEAKS_BUILD_DIR)/logger.o
+$(LEAKS_BIN_DIR)/fwdd: $(LEAKS_BUILD_DIR)/fwdd.o $(LEAKS_BUILD_DIR)/mesh.o $(LEAKS_BUILD_DIR)/util.o $(LEAKS_BUILD_DIR)/logger.o
 	@mkdir -p $(LEAKS_BIN_DIR)
 	$(CXX) -o $@ $^ $(LEAKS_CXXFLAGS)
 
