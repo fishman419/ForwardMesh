@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ForwardMesh · Architecture</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Serif:ital@0;1&family=Noto+Sans+KR:wght@400;500;600&family=Noto+Serif+KR:wght@400&family=Noto+Sans+TC:wght@400;500;600&family=Noto+Serif+TC:wght@400&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    /* ── Tokens (Default Editorial Light Skin) ──────────────────── */
+    :root {
+      --color-paper:       #f5f5f5;
+      --color-paper-2:     #ececec;
+      --color-ink:         #2d3142;
+      --color-muted:       #4f5d75;
+      --color-soft:        #5a6580;
+      --color-rule:        rgba(45,49,66,0.12);
+      --color-rule-solid:  #bfc0c0;
+      --color-accent:      #bf4520;
+      --color-accent-tint: rgba(191,69,32,0.08);
+      --color-link:        #2e5aa8;
+      --font-sans:   'Geist', system-ui, sans-serif;
+      --font-serif:  'Instrument Serif', 'Noto Serif', 'Noto Serif KR', 'Times New Roman', serif;
+      --font-mono:   'Geist Mono', ui-monospace, Menlo, monospace;
+    }
+
+    body {
+      font-family: var(--font-sans);
+      background: var(--color-paper);
+      min-height: 100vh;
+      padding: 3rem 2rem;
+      color: var(--color-ink);
+    }
+
+    .container { max-width: 1240px; margin: 0 auto; }
+
+    /* ── Header ─────────────────────────────────────────────────── */
+    .header { margin-bottom: 2.25rem; }
+
+    .header-eyebrow {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      font-weight: 500;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--color-muted);
+      margin-bottom: 0.75rem;
+    }
+
+    h1 {
+      font-family: var(--font-serif);
+      font-size: clamp(1.75rem, 3vw + 1rem, 2.5rem);
+      font-weight: 400;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+      color: var(--color-ink);
+      margin-bottom: 0.5rem;
+    }
+
+    .subtitle {
+      font-family: var(--font-sans);
+      font-size: 1rem;
+      line-height: 1.55;
+      color: var(--color-muted);
+      max-width: 66ch;
+    }
+
+    /* ── Diagram container ──────────────────────────────────────── */
+    .diagram-container {
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
+      background: transparent;
+      border: none;
+      padding: 0;
+      overflow-x: auto;
+    }
+
+    svg { width: 100%; min-width: 1160px; display: block; }
+
+    @media print {
+      .diagram-container { overflow-x: visible; }
+      svg { min-width: 0; }
+    }
+
+    /* ── Summary cards (varied column widths, no shadow) ────────── */
+    .cards {
+      display: grid;
+      grid-template-columns: 1.1fr 1fr 0.9fr;
+      gap: 1rem;
+      margin-top: 1.75rem;
+    }
+
+    @media (max-width: 860px) {
+      .cards { grid-template-columns: 1fr; }
+    }
+
+    .card {
+      background: #ffffff;
+      border-radius: 6px;
+      border: 1px solid var(--color-rule);
+      padding: 1.25rem;
+    }
+
+    .card .eyebrow {
+      font-family: var(--font-mono);
+      font-size: 0.625rem;
+      font-weight: 500;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--color-muted);
+      margin-bottom: 0.5rem;
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      margin-bottom: 0.875rem;
+      padding-bottom: 0.875rem;
+      border-bottom: 1px solid rgba(45,49,66,0.08);
+    }
+
+    .card-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .card-dot.ink   { background: var(--color-ink); }
+    .card-dot.muted { background: var(--color-muted); }
+    .card-dot.coral { background: var(--color-accent); }
+    .card-dot.link  { background: var(--color-link); }
+    .card-dot.soft  { background: var(--color-soft); }
+
+    .card h3 {
+      font-family: var(--font-sans);
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--color-ink);
+      letter-spacing: -0.005em;
+    }
+
+    .card ul {
+      list-style: none;
+      color: var(--color-muted);
+      font-size: 0.8125rem;
+      line-height: 1.55;
+    }
+
+    .card li {
+      margin-bottom: 0.35rem;
+      padding-left: 0.875rem;
+      position: relative;
+    }
+
+    .card li::before {
+      content: '—';
+      position: absolute;
+      left: 0;
+      color: rgba(45,49,66,0.25);
+      font-size: 0.75rem;
+    }
+
+    .card code {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--color-ink);
+    }
+
+    /* ── Footer ─────────────────────────────────────────────────── */
+    .footer {
+      margin-top: 2rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid rgba(45,49,66,0.10);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
+      color: var(--color-soft);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <div class="header">
+      <p class="header-eyebrow">Architecture · Protocol V2 · ForwardMesh</p>
+      <h1>Source-routed cut-through file mesh</h1>
+      <p class="subtitle">Files traverse an arbitrary chain of <code>fwdd</code> nodes over big-endian Protocol V2 TCP streams: intermediate hops decrement TTL and pipe 64 KB chunks with zero disk I/O unless single-pass tee caching is requested, verifying IEEE 802.3 CRC32 at every stage.</p>
+    </div>
+
+    <div class="diagram-container">
+      <svg viewBox="0 0 1160 504" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="forwardmesh-arch-title forwardmesh-arch-desc">
+        <title id="forwardmesh-arch-title">ForwardMesh source-routed file forwarding architecture</title>
+        <desc id="forwardmesh-arch-desc">Architecture diagram showing the fwd client pushing and pulling files across an intermediate fwdd relay hop with optional tee caching to a final fwdd endpoint node.</desc>
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/>
+          </marker>
+          <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#bf4520"/>
+          </marker>
+          <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/>
+          </marker>
+        </defs>
+
+        <!-- Clean paper background -->
+        <rect width="100%" height="100%" fill="#f5f5f5"/>
+
+        <!-- =================================================================
+             1. ZONES (max 3 flat zones; drawn before arrows, labels, and nodes)
+             ================================================================= -->
+
+        <!-- Zone 1: Client -->
+        <rect x="40" y="72" width="200" height="336" rx="8"
+              fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+        <rect x="56" y="76" width="104" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="108" y="85" fill="#5a6580" font-size="8"
+              font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle" letter-spacing="0.14em">CLIENT · FWD</text>
+
+        <!-- Zone 2: Intermediate Hop -->
+        <rect x="344" y="72" width="472" height="336" rx="8"
+              fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+        <rect x="360" y="76" width="184" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="452" y="85" fill="#5a6580" font-size="8"
+              font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle" letter-spacing="0.14em">INTERMEDIATE HOP · FWDD</text>
+
+        <!-- Zone 3: Final Node -->
+        <rect x="920" y="72" width="200" height="336" rx="8"
+              fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+        <rect x="936" y="76" width="144" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="1008" y="85" fill="#5a6580" font-size="8"
+              font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle" letter-spacing="0.14em">FINAL NODE · TTL=0</text>
+
+        <!-- =================================================================
+             2. EDITORIAL CALLOUT (top margin, neutral ink voice)
+             ================================================================= -->
+        <text x="816" y="36" fill="#2d3142" font-size="14" font-style="italic"
+              font-family="'Instrument Serif', Georgia, 'Times New Roman', serif" text-anchor="end">zero-disk cut-through by default — 64 KB streaming chunks</text>
+        <path d="M 736,44 Q 716,72 708,108" fill="none"
+              stroke="rgba(45,49,66,0.40)" stroke-width="1" stroke-dasharray="4,3"/>
+        <circle cx="708" cy="108" r="2" fill="#2d3142"/>
+
+        <!-- =================================================================
+             3. ARROWS (orthogonal only, fanned ports, drawn behind nodes)
+             ================================================================= -->
+
+        <!-- Zone 1 vertical: Local File <-> fwd Client -->
+        <line x1="124" y1="296" x2="124" y2="192" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="156" y1="192" x2="156" y2="296" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+
+        <!-- Client <-> Intermediate Hop (TCP :40000) -->
+        <line x1="220" y1="140" x2="364" y2="140" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+        <line x1="364" y1="168" x2="220" y2="168" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+
+        <!-- Intra-hop: Accept & Pool -> Stream / Tee Relay -->
+        <line x1="524" y1="152" x2="616" y2="152" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+        <!-- Intermediate Hop: Stream / Tee Relay -> Hop Tee Cache (optional) -->
+        <line x1="704" y1="192" x2="704" y2="296" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+
+        <!-- Intermediate Hop <-> Final Node (Cut-through headline path in coral) -->
+        <line x1="796" y1="140" x2="940" y2="140" stroke="#bf4520" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+        <line x1="940" y1="168" x2="796" y2="168" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+
+        <!-- Zone 3 vertical: Endpoint Handler <-> Target Workdir -->
+        <line x1="1004" y1="192" x2="1004" y2="296" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="1036" y1="296" x2="1036" y2="192" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+
+        <!-- =================================================================
+             4. ARROW LABELS (opaque paper masks, exact 8px gap from strokes)
+             ================================================================= -->
+
+        <!-- Zone 1 vertical labels -->
+        <rect x="80" y="236" width="36" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="98" y="245" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle" letter-spacing="0.06em">READ</text>
+
+        <rect x="164" y="236" width="36" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="182" y="245" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle" letter-spacing="0.06em">SAVE</text>
+
+        <!-- Client <-> Hop labels -->
+        <rect x="248" y="120" width="88" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="292" y="129" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle" letter-spacing="0.06em">V2 · NODES[N]</text>
+
+        <rect x="248" y="176" width="88" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="292" y="185" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle" letter-spacing="0.06em">ACK / STREAM</text>
+
+        <!-- Intra-hop dispatch label -->
+        <rect x="540" y="132" width="60" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="570" y="141" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle" letter-spacing="0.06em">FD QUEUE</text>
+
+        <!-- Optional tee label -->
+        <rect x="712" y="236" width="68" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="746" y="245" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle" letter-spacing="0.06em">TEE ON -S</text>
+
+        <!-- Hop <-> Final labels -->
+        <rect x="828" y="120" width="80" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="868" y="129" fill="#bf4520" font-size="8" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle" letter-spacing="0.06em">HOP · TTL-1</text>
+
+        <rect x="824" y="176" width="88" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="868" y="185" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle" letter-spacing="0.06em">RESP + CRC32</text>
+
+        <!-- Zone 3 vertical labels -->
+        <rect x="948" y="236" width="48" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="972" y="245" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle" letter-spacing="0.06em">COMMIT</text>
+
+        <rect x="1044" y="236" width="36" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="1062" y="245" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle" letter-spacing="0.06em">READ</text>
+
+        <!-- =================================================================
+             5. COMPONENT NODES (7 nodes, 4px grid, opaque paper masks first)
+             ================================================================= -->
+
+        <!-- Node 1: fwd Client (input treatment) -->
+        <rect x="60" y="112" width="160" height="80" rx="6" fill="#f5f5f5"/>
+        <rect x="60" y="112" width="160" height="80" rx="6" fill="rgba(79,93,117,0.10)" stroke="#5a6580" stroke-width="1"/>
+        <rect x="68" y="120" width="32" height="12" rx="2" fill="transparent" stroke="rgba(90,101,128,0.40)" stroke-width="0.8"/>
+        <text x="84" y="129" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">CLI</text>
+        <text x="140" y="156" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">fwd Client</text>
+        <text x="140" y="174" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle">SendFile · PullFile</text>
+
+        <!-- Node 2: Local File (store treatment) -->
+        <rect x="60" y="296" width="160" height="80" rx="6" fill="#f5f5f5"/>
+        <rect x="60" y="296" width="160" height="80" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+        <rect x="68" y="304" width="36" height="12" rx="2" fill="transparent" stroke="rgba(79,93,117,0.50)" stroke-width="0.8"/>
+        <text x="86" y="313" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">DISK</text>
+        <text x="140" y="340" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Local File</text>
+        <text x="140" y="358" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle">-f src · .part.XXXXXX</text>
+
+        <!-- Node 3: Accept & Pool (backend treatment) -->
+        <rect x="364" y="112" width="160" height="80" rx="6" fill="#f5f5f5"/>
+        <rect x="364" y="112" width="160" height="80" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="516" y="182" fill="rgba(45,49,66,0.06)" font-size="28" font-weight="600" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="end">01</text>
+        <rect x="372" y="120" width="36" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+        <text x="390" y="129" fill="#2d3142" font-size="8" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">POOL</text>
+        <text x="444" y="156" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Accept &amp; Pool</text>
+        <text x="444" y="174" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle">poll :40000 · -t 4</text>
+
+        <!-- Node 4: Stream / Tee Relay (FOCAL coral treatment) -->
+        <rect x="616" y="112" width="180" height="80" rx="6" fill="#f5f5f5"/>
+        <rect x="616" y="112" width="180" height="80" rx="6" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+        <text x="788" y="182" fill="rgba(191,69,32,0.08)" font-size="28" font-weight="600" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="end">02</text>
+        <rect x="624" y="120" width="44" height="12" rx="2" fill="transparent" stroke="rgba(191,69,32,0.50)" stroke-width="0.8"/>
+        <text x="646" y="129" fill="#bf4520" font-size="8" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">RELAY</text>
+        <text x="706" y="156" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Stream / Tee Relay</text>
+        <text x="706" y="174" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle">TTL-1 · CRC32 · 64KB</text>
+
+        <!-- Node 5: Hop Tee Cache (optional treatment) -->
+        <rect x="616" y="296" width="180" height="80" rx="6" fill="#f5f5f5"/>
+        <rect x="616" y="296" width="180" height="80" rx="6" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="4,3"/>
+        <rect x="624" y="304" width="32" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.25)" stroke-width="0.8"/>
+        <text x="640" y="313" fill="#5a6580" font-size="8" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">OPT</text>
+        <text x="706" y="340" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Hop Tee Cache</text>
+        <text x="706" y="358" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle">-s/-S · .fwd_tee_XXXXXX</text>
+
+        <!-- Node 6: Endpoint Handler (backend treatment) -->
+        <rect x="940" y="112" width="160" height="80" rx="6" fill="#f5f5f5"/>
+        <rect x="940" y="112" width="160" height="80" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="1092" y="182" fill="rgba(45,49,66,0.06)" font-size="28" font-weight="600" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="end">03</text>
+        <rect x="948" y="120" width="36" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+        <text x="966" y="129" fill="#2d3142" font-size="8" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">ENDP</text>
+        <text x="1020" y="156" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Endpoint Handler</text>
+        <text x="1020" y="174" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle">StoreLocal · PullFile</text>
+
+        <!-- Node 7: Target Workdir (store treatment) -->
+        <rect x="940" y="296" width="160" height="80" rx="6" fill="#f5f5f5"/>
+        <rect x="940" y="296" width="160" height="80" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+        <rect x="948" y="304" width="44" height="12" rx="2" fill="transparent" stroke="rgba(79,93,117,0.50)" stroke-width="0.8"/>
+        <text x="970" y="313" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">STORE</text>
+        <text x="1020" y="340" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Target Workdir</text>
+        <text x="1020" y="358" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, Menlo, monospace" text-anchor="middle">-d dir · atomic rename</text>
+
+        <!-- =================================================================
+             6. LEGEND STRIP (horizontal strip outside all zones, exact match)
+             ================================================================= -->
+        <line x1="40" y1="436" x2="1120" y2="436" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+        <text x="40" y="454" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, Menlo, monospace" letter-spacing="0.18em">LEGEND</text>
+
+        <rect x="40" y="468" width="14" height="10" rx="2" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+        <text x="60" y="476" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Focal relay</text>
+
+        <rect x="144" y="468" width="14" height="10" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="164" y="476" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Daemon stage</text>
+
+        <rect x="260" y="468" width="14" height="10" rx="2" fill="rgba(79,93,117,0.10)" stroke="#5a6580" stroke-width="1"/>
+        <text x="280" y="476" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Client CLI</text>
+
+        <rect x="360" y="468" width="14" height="10" rx="2" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+        <text x="380" y="476" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Disk store</text>
+
+        <rect x="460" y="468" width="14" height="10" rx="2" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="3,2"/>
+        <text x="480" y="476" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Optional cache</text>
+
+        <line x1="584" y1="473" x2="608" y2="473" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+        <text x="616" y="476" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">V2 request</text>
+
+        <line x1="704" y1="473" x2="728" y2="473" stroke="#bf4520" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+        <text x="736" y="476" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Cut-through</text>
+
+        <line x1="832" y1="473" x2="856" y2="473" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <text x="864" y="476" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Sync / commit</text>
+
+        <line x1="968" y1="473" x2="992" y2="473" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+        <text x="1000" y="476" fill="#4f5d75" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Return / tee</text>
+      </svg>
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <p class="eyebrow">DATA PLANE</p>
+        <div class="card-header">
+          <span class="card-dot coral"></span>
+          <h3>Cut-through streaming &amp; single-pass tee</h3>
+        </div>
+        <ul>
+          <li><code>kFlagNone (0x00)</code> streams sockets end-to-end via <code>RelayStream()</code> in <code>64 KB</code> buffers with zero intermediate disk writes</li>
+          <li><code>-s</code> (<code>kFlagStoreOnHop</code>) or daemon <code>-S</code> tees bytes to <code>.fwd_tee_XXXXXX</code> in one pass</li>
+          <li>Symmetric support for multi-hop <code>ForwardPush (1)</code> and reverse-streamed <code>ForwardPull (0)</code></li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <p class="eyebrow">WIRE PROTOCOL V2</p>
+        <div class="card-header">
+          <span class="card-dot link"></span>
+          <h3>Source-routed header consumption</h3>
+        </div>
+        <ul>
+          <li>Big-endian frame: <code>ForwardHead (28B) + ForwardNode[ttl] + ForwardFile + data</code></li>
+          <li><code>uint64_t</code> packet &amp; file lengths lift the 4 GB ceiling; magic <code>0xFF44AADD</code>, max TTL <code>32</code></li>
+          <li>Each relay hop consumes <code>nodes[0]</code>, decrements <code>ttl</code>, and trims <code>8B</code> from <code>length</code></li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <p class="eyebrow">RELIABILITY &amp; OPS</p>
+        <div class="card-header">
+          <span class="card-dot ink"></span>
+          <h3>In-flight CRC32 &amp; daemon model</h3>
+        </div>
+        <ul>
+          <li>IEEE 802.3 <code>crc32</code> checked in-flight on hops and before atomic <code>rename()</code> (<code>retcode = 6</code> on tamper)</li>
+          <li>Pre-<code>fork()</code> socket bind, <code>poll()</code> accept loop + worker pool, and <code>30s</code> socket timeouts</li>
+          <li>Path-traversal guard (<code>IsSafeRelativePath</code>) and 64-bit request <code>id</code> across logs</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="footer">
+      <span>ForwardMesh · Architecture Overview (src/fwdd.cc, src/fwd.cc, src/protocol.h)</span>
+      <span>2026-11-26</span>
+    </div>
+
+  </div>
+</body>
+</html>
