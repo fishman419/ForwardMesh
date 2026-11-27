@@ -2,6 +2,12 @@
 
 Cross-subnet multi-hop file forwarding mesh with zero-config route learning, path-vector heartbeat synchronization, automatic missing-hop completion, mid-path failover rerouting, cut-through streaming, and end-to-end CRC32 verification.
 
+## Architecture
+
+[![ForwardMesh Architecture](docs/architecture.svg)](docs/architecture.svg)
+
+> Full editorial page (with Mesh control-plane, data-plane & Protocol V2 summary cards): [docs/architecture.html](https://htmlpreview.github.io/?https://github.com/fishman419/ForwardMesh/blob/main/docs/architecture.html)
+
 ## Build & Test
 
 ```bash
